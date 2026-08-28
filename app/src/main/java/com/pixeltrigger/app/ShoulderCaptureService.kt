@@ -55,6 +55,7 @@ class ShoulderCaptureService : Service() {
         super.onCreate()
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
         prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+        engineEnabled = prefs.getBoolean(KEY_ENGINE_ENABLED, true)
         configureDetectors()
         shoulderInput = ShoulderShizukuEngine(this)
         shoulderInput.connect()
@@ -138,12 +139,21 @@ class ShoulderCaptureService : Service() {
             is DetectionEngine.Event.ManualRearmed -> mainHandler.post { refreshSideStatus(side, inputReady) }
 
             is DetectionEngine.Event.Fired -> {
-                if (inputReady) {
-                    if (side == Side.R) shoulderInput.fireR(pressDurationMs(Side.R))
-                    else shoulderInput.fireL(pressDurationMs(Side.L))
+                // Do not gate FIRE on a cached readiness bit. The direct binder
+                // call is the source of truth and returns only after KEY DOWN was
+                // accepted (or an explicit failure was returned).
+                val delivered = if (side == Side.R) {
+                    shoulderInput.fireR(pressDurationMs(Side.R))
+                } else {
+                    shoulderInput.fireL(pressDurationMs(Side.L))
+                }
+                if (delivered) {
+                    detector.confirmFireDelivery()
+                } else {
+                    detector.retryAfterFailedFire()
                 }
                 mainHandler.post {
-                    setSideStatus(side, if (inputReady) SensorStatus.FIRED else SensorStatus.INPUT_NOT_READY)
+                    setSideStatus(side, if (delivered) SensorStatus.FIRED else SensorStatus.INPUT_NOT_READY)
                 }
             }
             else -> Unit
@@ -294,6 +304,8 @@ class ShoulderCaptureService : Service() {
 
     private fun setEngineEnabled(enabled: Boolean) {
         engineEnabled = enabled
+        prefs.edit().putBoolean(KEY_ENGINE_ENABLED, enabled).apply()
+        if (!enabled) shoulderInput.releaseAll()
         rDetector.resetForSensorMove()
         lDetector.resetForSensorMove()
         refreshStatusViews()
@@ -371,7 +383,10 @@ class ShoulderCaptureService : Service() {
         if (activeInstance === this) activeInstance = null
         rView?.let { runCatching { windowManager.removeView(it) } }
         lView?.let { runCatching { windowManager.removeView(it) } }
-        if (::shoulderInput.isInitialized) shoulderInput.disconnect()
+        if (::shoulderInput.isInitialized) {
+            shoulderInput.releaseAll()
+            shoulderInput.disconnect()
+        }
         wakeLock?.let { if (it.isHeld) it.release() }
         super.onDestroy()
     }
@@ -396,6 +411,7 @@ class ShoulderCaptureService : Service() {
         const val ACTION_SET_ENABLED = "com.pixeltrigger.app.action.SET_SHOULDER_ENABLED"
         const val EXTRA_ENABLED = "shoulder_enabled"
         const val PREFS_NAME = "pixeltrigger_shoulder_v5"
+        const val KEY_ENGINE_ENABLED = "shoulder_half_enabled"
         const val MONITOR_DIAMETER_MM = 0.3f
         private const val CHANNEL_ID = "pixeltrigger_shoulder"
         private const val NOTIFICATION_ID = 5205

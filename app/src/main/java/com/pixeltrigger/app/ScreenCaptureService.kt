@@ -50,6 +50,7 @@ import kotlin.math.roundToInt
 class ScreenCaptureService : Service() {
     private lateinit var windowManager: WindowManager
     private lateinit var preferences: SharedPreferences
+    private lateinit var shoulderPreferences: SharedPreferences
     private val mainHandler = Handler(android.os.Looper.getMainLooper())
 
     private var captureThread: HandlerThread? = null
@@ -85,7 +86,7 @@ class ScreenCaptureService : Service() {
 
     private var circlesVisible = true
     @Volatile private var engineEnabled = true
-    @Volatile private var systemEnabled = true
+    @Volatile private var shoulderHalfEnabled = true
     @Volatile private var circleEditMode = false
     private var lastInputReady = false
 
@@ -105,7 +106,10 @@ class ScreenCaptureService : Service() {
         super.onCreate()
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
         preferences = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+        shoulderPreferences = getSharedPreferences(ShoulderCaptureService.PREFS_NAME, MODE_PRIVATE)
         circlesVisible = preferences.getBoolean(KEY_CIRCLES_VISIBLE, true)
+        engineEnabled = preferences.getBoolean(KEY_RIGHT_ENGINE_ENABLED, true)
+        shoulderHalfEnabled = shoulderPreferences.getBoolean(ShoulderCaptureService.KEY_ENGINE_ENABLED, true)
         activeGroup = preferences.getInt(KEY_ACTIVE_GROUP, 0).coerceIn(0, GROUP_COUNT - 1)
         detectionEngines.forEach {
             it.whiteRearmEnabled = true
@@ -214,8 +218,14 @@ class ScreenCaptureService : Service() {
             is DetectionEngine.Event.Rearmed,
             is DetectionEngine.Event.ManualRearmed -> refreshSensorStatus(inputReady)
             is DetectionEngine.Event.Fired -> {
-                executeTapImmediately()
-                refreshSensorStatus(inputReady, SensorStatus.FIRED)
+                val delivered = executeTapImmediately()
+                if (delivered) {
+                    detectionEngines[index].confirmFireDelivery()
+                    refreshSensorStatus(true, SensorStatus.FIRED)
+                } else {
+                    detectionEngines[index].retryAfterFailedFire()
+                    refreshSensorStatus(false, SensorStatus.INPUT_NOT_READY)
+                }
             }
             else -> Unit
         }
@@ -234,10 +244,10 @@ class ScreenCaptureService : Service() {
         return PixelSampler.sampleCircularRegion(image, centerX, centerY, radiusX, radiusY)
     }
 
-    private fun executeTapImmediately() {
-        if (!engineEnabled) return
-        val target = targetParams ?: return
-        tapEngine.fireFast(
+    private fun executeTapImmediately(): Boolean {
+        if (!engineEnabled) return false
+        val target = targetParams ?: return false
+        return tapEngine.fireFast(
             target.x + targetTouchSize / 2f,
             target.y + targetTouchSize / 2f,
             displayId = 0,
@@ -474,6 +484,7 @@ class ScreenCaptureService : Service() {
 
     private fun setRightEngineEnabled(enabled: Boolean) {
         engineEnabled = enabled
+        preferences.edit().putBoolean(KEY_RIGHT_ENGINE_ENABLED, enabled).apply()
         detectionEngines.forEach { it.resetForSensorMove() }
         refreshSensorStatus(tapEngine.isReady(), if (enabled) null else SensorStatus.OFF)
         updateButtonVisual()
@@ -481,34 +492,47 @@ class ScreenCaptureService : Service() {
 
     private fun toggleRightEngine() = setRightEngineEnabled(!engineEnabled)
 
-    private fun toggleAllEngines() {
-        systemEnabled = !systemEnabled
-        setRightEngineEnabled(systemEnabled)
+    private fun setLeftEngineEnabled(enabled: Boolean) {
+        shoulderHalfEnabled = enabled
+        shoulderPreferences.edit().putBoolean(ShoulderCaptureService.KEY_ENGINE_ENABLED, enabled).apply()
         runCatching {
             startService(Intent(this, ShoulderCaptureService::class.java).apply {
                 action = ShoulderCaptureService.ACTION_SET_ENABLED
-                putExtra(ShoulderCaptureService.EXTRA_ENABLED, systemEnabled)
+                putExtra(ShoulderCaptureService.EXTRA_ENABLED, enabled)
             })
         }
-        showMessage(if (systemEnabled) "PixelTrigger V5 ON" else "PixelTrigger V5 OFF")
+        updateButtonVisual()
+        menuStatusText?.text = combinedStatusText()
+    }
+
+    private fun toggleLeftEngine() = setLeftEngineEnabled(!shoulderHalfEnabled)
+
+    private fun toggleAllEngines() {
+        val anyHalfEnabled = engineEnabled || shoulderHalfEnabled
+        val targetEnabled = !anyHalfEnabled
+        setRightEngineEnabled(targetEnabled)
+        setLeftEngineEnabled(targetEnabled)
+        showMessage(if (targetEnabled) "PixelTrigger V5 ON" else "PixelTrigger V5 OFF")
     }
 
     private fun updateButtonVisual() {
         val button = menuButton ?: return
         val state = detectionEngines[activeGroup].state
+        val bothHalvesOff = !engineEnabled && !shoulderHalfEnabled
         val fill = when {
             circleEditMode -> Color.rgb(30, 165, 92)
-            !engineEnabled -> Color.rgb(95, 95, 104)
+            bothHalvesOff -> Color.rgb(95, 95, 104)
+            !engineEnabled -> Color.rgb(122, 92, 55)
             tapEngine.capability != InputCapability.CONCURRENT_TOUCH_SAFE -> Color.rgb(165, 70, 190)
             state == DetectionEngine.State.ARMED -> Color.rgb(32, 170, 88)
             else -> Color.rgb(79, 52, 185)
         }
         button.text = when {
             circleEditMode -> "✓"
-            !engineEnabled -> "OFF"
+            bothHalvesOff -> "OFF"
             else -> "${activeGroup + 1}"
         }
-        button.textSize = if (engineEnabled) 17f else 10f
+        button.textSize = if (bothHalvesOff) 10f else 17f
         button.background = roundedBackground(fill, Color.rgb(155, 135, 255), 18f)
     }
 
@@ -555,22 +579,31 @@ class ScreenCaptureService : Service() {
         rightRow1.addView(smallCard("✥ تعديل الموضع") { beginCirclePositionEditing() }, LinearLayout.LayoutParams(0, dp(58), 1f))
         content.addView(rightRow1, matchWrap(dp(60)))
 
-        val rightRow2 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        rightRow2.addView(
+        content.addView(
             smallCard(if (circlesVisible) "◉ إخفاء الدائرة" else "○ إظهار الدائرة") {
                 setCirclesVisible(!circlesVisible)
                 closeMenu()
             },
+            matchWrap(dp(58)),
+        )
+
+        content.addView(sectionLabel("تشغيل النصفين", Color.rgb(55, 105, 125)), matchWrap())
+        val halvesRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        halvesRow.addView(
+            smallCard(if (shoulderHalfEnabled) "■ إيقاف النصف الأيسر" else "▶ تشغيل النصف الأيسر") {
+                toggleLeftEngine()
+                closeMenu()
+            },
             LinearLayout.LayoutParams(0, dp(58), 1f),
         )
-        rightRow2.addView(
-            smallCard(if (engineEnabled) "■ إيقاف المراقبة" else "▶ تشغيل المراقبة") {
+        halvesRow.addView(
+            smallCard(if (engineEnabled) "■ إيقاف النصف الأيمن" else "▶ تشغيل النصف الأيمن") {
                 toggleRightEngine()
                 closeMenu()
             },
             LinearLayout.LayoutParams(0, dp(58), 1f),
         )
-        content.addView(rightRow2, matchWrap(dp(60)))
+        content.addView(halvesRow, matchWrap(dp(60)))
 
         content.addView(sectionLabel("SHOULDER  •  R / L", Color.rgb(150, 49, 76)), matchWrap())
         content.addView(shoulderControlCard(), matchWrap())
@@ -962,7 +995,7 @@ class ScreenCaptureService : Service() {
         private const val MONITOR_DIAMETER_MM = 0.3f
         private const val CAPTURE_SCALE = 0.5f
         private const val DISPLAY_REFRESH_DEBOUNCE_MS = 16L
-        private const val ENGINE_HOLD_MS = 750L
+        private const val ENGINE_HOLD_MS = 500L
 
         private const val KEY_ACTIVE_GROUP = "active_monitor_group"
         private const val KEY_SENSOR_X = "sensor_x"
@@ -974,6 +1007,7 @@ class ScreenCaptureService : Service() {
         private const val KEY_MENU_X = "menu_x"
         private const val KEY_MENU_Y = "menu_y"
         private const val KEY_CIRCLES_VISIBLE = "circles_visible"
+        private const val KEY_RIGHT_ENGINE_ENABLED = "right_half_enabled"
         private const val KEY_WHITE_REARM = "white_rearm_enabled"
         private const val KEY_REARM_DELAY_ENABLED = "rearm_delay_enabled"
     }

@@ -39,8 +39,9 @@ int emitEvent(int fd, unsigned short type, unsigned short code, int value) {
     ev.code = code;
     ev.value = value;
     const ssize_t written = write(fd, &ev, sizeof(ev));
-    if (written != static_cast<ssize_t>(sizeof(ev))) return -errno;
-    return 0;
+    if (written == static_cast<ssize_t>(sizeof(ev))) return 0;
+    if (written < 0) return -errno;
+    return -EIO;
 }
 
 int createTgkDevice(const char *name, int keyCode, int &outFd) {
@@ -65,9 +66,13 @@ int createTgkDevice(const char *name, int keyCode, int &outFd) {
     device.id.version = 1;
     device.absmin[ABS_DISTANCE] = -1;
     device.absmax[ABS_DISTANCE] = 100;
+    device.absfuzz[ABS_DISTANCE] = 0;
+    device.absflat[ABS_DISTANCE] = 0;
 
     const ssize_t written = write(fd, &device, sizeof(device));
-    if (written != static_cast<ssize_t>(sizeof(device))) return fail(-errno);
+    if (written != static_cast<ssize_t>(sizeof(device))) {
+        return fail(written < 0 ? -errno : -EIO);
+    }
     if (ioctl(fd, UI_DEV_CREATE) < 0) return fail(-errno);
 
     outFd = fd;
@@ -76,7 +81,6 @@ int createTgkDevice(const char *name, int keyCode, int &outFd) {
 
 int initLocked() {
     if (gFdF7 >= 0 && gFdF8 >= 0) {
-        setStatus("uinput ready: R=KEY_F7, L=KEY_F8");
         return 0;
     }
 
@@ -96,9 +100,17 @@ int initLocked() {
         return rc;
     }
 
-    usleep(300000);
+    // Match the proven standalone RedMagic path: EventHub/InputReader gets a
+    // full discovery window before the service advertises itself as ready.
+    usleep(500000);
     setStatus("uinput ready: R=KEY_F7, L=KEY_F8");
     return 0;
+}
+
+int resetLocked() {
+    closeDevice(gFdF7);
+    closeDevice(gFdF8);
+    return initLocked();
 }
 
 int fdForKey(int keyCode) {
@@ -151,6 +163,12 @@ Java_com_pixeltrigger_app_input_ShoulderInputUserService_nativeKeyUp(JNIEnv *, j
     const int rc = keyUpLocked(keyCode);
     if (rc != 0) setStatus("key up failed rc=" + std::to_string(rc) + " " + std::strerror(-rc));
     return rc;
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_pixeltrigger_app_input_ShoulderInputUserService_nativeResetBackend(JNIEnv *, jclass) {
+    std::lock_guard<std::mutex> lock(gMutex);
+    return resetLocked();
 }
 
 extern "C" JNIEXPORT jstring JNICALL

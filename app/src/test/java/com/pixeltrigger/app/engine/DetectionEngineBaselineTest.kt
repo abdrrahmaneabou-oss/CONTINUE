@@ -214,6 +214,30 @@ class DetectionEngineBaselineTest {
         assertTrue(e.processSample(changedDark, 5) is DetectionEngine.Event.Fired)
     }
 
+    @Test fun failedInputDeliveryRestoresArmedAndRetriesNextFrame() {
+        val e = DetectionEngine()
+        val armedWhite = probeSample(rgb(240))
+        val changedDark = probeSample(rgb(70), whiteRatio = 0f)
+        arm(e, armedWhite)
+
+        assertTrue(e.processSample(changedDark, 4) is DetectionEngine.Event.Fired)
+        assertEquals(DetectionEngine.State.WAITING_REARM, e.state)
+        assertTrue(e.retryAfterFailedFire())
+        assertEquals(DetectionEngine.State.ARMED, e.state)
+        assertTrue(e.processSample(changedDark, 5) is DetectionEngine.Event.Fired)
+    }
+
+    @Test fun confirmedInputDeliveryStaysInWaitingRearm() {
+        val e = DetectionEngine()
+        arm(e, probeSample(rgb(240)))
+
+        assertTrue(e.processSample(probeSample(rgb(70), whiteRatio = 0f), 4) is DetectionEngine.Event.Fired)
+        e.confirmFireDelivery()
+
+        assertTrue(!e.retryAfterFailedFire())
+        assertEquals(DetectionEngine.State.WAITING_REARM, e.state)
+    }
+
     @Test fun v4SmallPerPixelJitterDoesNotFire() {
         val e = DetectionEngine()
         val armedWhite = probeSample(rgb(240))

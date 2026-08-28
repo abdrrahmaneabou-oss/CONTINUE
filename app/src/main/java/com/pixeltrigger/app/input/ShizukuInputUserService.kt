@@ -57,66 +57,68 @@ class ShizukuInputUserService : IShizukuInputService.Stub {
     override fun getCapabilityDetail(): String = detail
 
     /**
-     * One-way AIDL entrypoint. The caller returns as soon as Binder queues this
-     * transaction; all vendor work below happens off the capture hot path.
+     * Synchronous delivery result, with DOWN still sent at the start of the call.
+     * Waiting for the result happens only after the action has begun and prevents
+     * the detector from reporting a false successful FIRE.
      */
-    override fun injectTapFast(triggerId: Long, x: Float, y: Float, displayId: Int) {
+    override fun injectTapFast(triggerId: Long, x: Float, y: Float, displayId: Int): Int {
         lastRequestReceivedNs = SystemClock.elapsedRealtimeNanos()
         runCatching { Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_DISPLAY) }
 
         if (Process.myUid() != SHELL_UID) {
             detail = "tap ignored: UserService uid=${Process.myUid()}"
-            return
+            return STATUS_ROOT_OR_NON_SHELL_REJECTED
         }
         if (triggerId <= 0L || !x.isFinite() || !y.isFinite()) {
             detail = "tap ignored: invalid argument"
-            return
+            return STATUS_INVALID_ARGUMENT
         }
 
         val injector = nubiaInjector ?: run {
             detail = "tap ignored: Nubia injector unavailable"
-            return
+            return STATUS_INJECTOR_UNAVAILABLE
         }
         @Suppress("UNUSED_VARIABLE")
         val ignoredDisplayId = displayId // Nubia owns internal-display coordinate translation.
 
         val px = x.roundToInt()
         val py = y.roundToInt()
-        var downSent = false
-        var upSent = false
-
         try {
             lastDownCallStartNs = SystemClock.elapsedRealtimeNanos()
             injector.send(ACTION_DOWN, px, py)
             lastDownCallEndNs = SystemClock.elapsedRealtimeNanos()
             lastDownNs = lastDownCallEndNs
-            downSent = true
+        } catch (failure: Throwable) {
+            detail = "Nubia DOWN rejected: ${failure.javaClass.simpleName}: ${failure.message ?: "unknown"}"
+            return STATUS_DOWN_REJECTED
+        }
 
-            // The 1 ms contact interval begins only after the synchronous vendor
-            // DOWN call returns. This prevents vendor-call time from consuming the
-            // requested DOWN->UP separation.
-            val upDeadlineNs = lastDownCallEndNs + TAP_DURATION_NS
-            while (SystemClock.elapsedRealtimeNanos() < upDeadlineNs) {
-                // Intentional short spin: no Handler/sleep scheduling jitter.
-            }
+        // The 1 ms contact interval begins only after the synchronous vendor
+        // DOWN call returns. This prevents vendor-call time from consuming the
+        // requested DOWN->UP separation.
+        val upDeadlineNs = lastDownCallEndNs + TAP_DURATION_NS
+        while (SystemClock.elapsedRealtimeNanos() < upDeadlineNs) {
+            // Intentional short spin: no Handler/sleep scheduling jitter.
+        }
 
+        return try {
             lastUpCallStartNs = SystemClock.elapsedRealtimeNanos()
             injector.send(ACTION_UP, px, py)
             lastUpCallEndNs = SystemClock.elapsedRealtimeNanos()
             lastUpNs = lastUpCallEndNs
-            upSent = true
             detail = injector.detail
-        } catch (t: Throwable) {
-            detail = "Nubia virtual-touch error: ${t.javaClass.simpleName}: ${t.message ?: "unknown"}"
-        } finally {
-            if (downSent && !upSent) {
-                runCatching {
-                    lastUpCallStartNs = SystemClock.elapsedRealtimeNanos()
-                    injector.send(ACTION_UP, px, py)
-                    lastUpCallEndNs = SystemClock.elapsedRealtimeNanos()
-                    lastUpNs = lastUpCallEndNs
-                }
-            }
+            STATUS_OK
+        } catch (failure: Throwable) {
+            detail = "Nubia UP rejected: ${failure.javaClass.simpleName}: ${failure.message ?: "unknown"}"
+            // Never leave a synthetic contact down. A duplicate UP is harmless,
+            // and a successful recovery means the requested tap was delivered.
+            val recovered = runCatching {
+                lastUpCallStartNs = SystemClock.elapsedRealtimeNanos()
+                injector.send(ACTION_UP, px, py)
+                lastUpCallEndNs = SystemClock.elapsedRealtimeNanos()
+                lastUpNs = lastUpCallEndNs
+            }.isSuccess
+            if (recovered) STATUS_OK else STATUS_UP_REJECTED
         }
     }
 

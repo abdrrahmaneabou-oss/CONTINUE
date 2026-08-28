@@ -142,6 +142,7 @@ class DetectionEngine(
 
     private var whiteFrames: Int = 0
     private var manualRearmWhiteFrames: Int = 0
+    private var pendingFireBaseline: ColorSample? = null
 
     private var whiteRedSum = 0L
     private var whiteGreenSum = 0L
@@ -179,7 +180,29 @@ class DetectionEngine(
         state = State.WAITING_FOR_WHITE
         clearOneTimeRearmRequest()
         armedWhiteSample = null
+        pendingFireBaseline = null
         resetWhiteSequence()
+    }
+
+    /**
+     * Completes the detector transaction after the input backend accepted FIRE.
+     * Detection itself stays on the first qualifying frame; this only discards
+     * the rollback snapshot after the physical/input action has been confirmed.
+     */
+    fun confirmFireDelivery() {
+        pendingFireBaseline = null
+    }
+
+    /**
+     * Restores ARMED when the input backend could not deliver FIRE. The same
+     * still-dark condition is retried on the very next captured frame instead
+     * of being lost in WAITING_REARM behind a false red status.
+     */
+    fun retryAfterFailedFire(): Boolean {
+        val baseline = pendingFireBaseline ?: return false
+        if (state != State.WAITING_REARM) return false
+        arm(baseline)
+        return true
     }
 
     /**
@@ -191,6 +214,7 @@ class DetectionEngine(
         state = State.WAITING_REARM
         clearOneTimeRearmRequest()
         armedWhiteSample = null
+        pendingFireBaseline = null
         firedAtMs = nowMs
         resetWhiteSequence()
     }
@@ -333,10 +357,12 @@ class DetectionEngine(
     private fun arm(sample: ColorSample) {
         state = State.ARMED
         armedWhiteSample = sample
+        pendingFireBaseline = null
         resetWhiteSequence()
     }
 
     private fun fire(nowMs: Long) {
+        pendingFireBaseline = armedWhiteSample
         state = State.WAITING_REARM
         clearOneTimeRearmRequest()
         armedWhiteSample = null

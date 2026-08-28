@@ -11,8 +11,8 @@ android {
         applicationId = "com.pixeltrigger.app"
         minSdk = 29
         targetSdk = 35
-        versionCode = 50
-        versionName = "5.0-shoulder-alpha1"
+        versionCode = 51
+        versionName = "5.0-fire-reliability1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 

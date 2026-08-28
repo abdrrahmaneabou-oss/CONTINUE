@@ -11,8 +11,8 @@ android {
         applicationId = "com.pixeltrigger.app"
         minSdk = 29
         targetSdk = 35
-        versionCode = 54
-        versionName = "5.0-manual-shoulder-bind"
+        versionCode = 55
+        versionName = "5.0-manual-shoulder-guard"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 

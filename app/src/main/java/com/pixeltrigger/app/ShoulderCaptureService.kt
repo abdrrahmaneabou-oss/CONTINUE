@@ -131,6 +131,11 @@ class ShoulderCaptureService : Service() {
         inputReady: Boolean,
         nowMs: Long,
     ) {
+        // A visible/enabled manual shoulder circle owns its selected side exclusively.
+        // This prevents the macro's own screen changes from feeding back into the
+        // automatic detector and recursively firing the same R/L action.
+        if (manualReservedSide == side) return
+
         val lp = params ?: return
         val sample = sample(image, crop, lp) ?: return
         when (detector.processSample(sample, nowMs)) {
@@ -167,11 +172,7 @@ class ShoulderCaptureService : Service() {
         return prefs.getInt("shoulder_${prefix}_seconds", 1).coerceIn(1, 5) * 1000
     }
 
-    /**
-     * The single source of truth for firing a configured shoulder button.
-     * Both detector FIRE events and the manual 13 mm trigger use this exact path,
-     * so Flash/HOLD always comes from PixelTrigger's current R/L settings.
-     */
+    /** Single source of truth for physical-style R/L firing. */
     private fun fireConfiguredSide(side: Side): Boolean {
         if (!::shoulderInput.isInitialized) return false
         if (!shoulderInput.isReady()) {
@@ -317,6 +318,14 @@ class ShoulderCaptureService : Service() {
         refreshStatusViews()
     }
 
+    private fun onManualReservationChanged() {
+        // Drop any previously armed baseline immediately. When reservation is
+        // removed the detector must acquire a fresh three-white-frame baseline.
+        rDetector.resetForSensorMove()
+        lDetector.resetForSensorMove()
+        refreshStatusViews()
+    }
+
     private fun refreshStatusViews() {
         val ready = shoulderInput.isReady()
         refreshSideStatus(Side.R, ready)
@@ -325,6 +334,7 @@ class ShoulderCaptureService : Service() {
 
     private fun refreshSideStatus(side: Side, ready: Boolean) {
         val status = when {
+            manualReservedSide == side -> SensorStatus.OFF
             !engineEnabled -> SensorStatus.OFF
             !ready -> SensorStatus.INPUT_NOT_READY
             detector(side).state == DetectionEngine.State.ARMED -> SensorStatus.ARMED
@@ -342,7 +352,8 @@ class ShoulderCaptureService : Service() {
         val r = if (!prefs.getBoolean("shoulder_r_hold", false)) "Flash" else "${prefs.getInt("shoulder_r_seconds", 1).coerceIn(1, 5)}s"
         val l = if (!prefs.getBoolean("shoulder_l_hold", false)) "Flash" else "${prefs.getInt("shoulder_l_seconds", 1).coerceIn(1, 5)}s"
         val state = if (engineEnabled) "ON" else "OFF"
-        return "R $r  •  L $l  •  $state"
+        val reserved = manualReservedSide?.name?.let { " • Manual $it" } ?: ""
+        return "R $r  •  L $l  •  $state$reserved"
     }
 
     private fun overlayParams(width: Int, height: Int) = WindowManager.LayoutParams(
@@ -399,15 +410,28 @@ class ShoulderCaptureService : Service() {
 
     companion object {
         @Volatile private var activeInstance: ShoulderCaptureService? = null
+        @Volatile private var manualReservedSide: Side? = null
 
         fun dispatchSharedFrame(image: Image, screenWidth: Int, screenHeight: Int) {
             activeInstance?.consumeSharedFrame(image, screenWidth, screenHeight)
         }
 
-        /** Manual overlay entry points. They intentionally bypass detector enable state. */
+        /** Manual overlay entry points intentionally bypass automatic detector state. */
         fun fireConfiguredR(): Boolean = activeInstance?.fireConfiguredSide(Side.R) ?: false
 
         fun fireConfiguredL(): Boolean = activeInstance?.fireConfiguredSide(Side.L) ?: false
+
+        fun reserveManualR() = setManualReservation(Side.R)
+
+        fun reserveManualL() = setManualReservation(Side.L)
+
+        fun clearManualReservation() = setManualReservation(null)
+
+        private fun setManualReservation(side: Side?) {
+            if (manualReservedSide == side) return
+            manualReservedSide = side
+            activeInstance?.onManualReservationChanged()
+        }
 
         fun statusSummary(): String = activeInstance?.summary() ?: "R/L starting…"
 

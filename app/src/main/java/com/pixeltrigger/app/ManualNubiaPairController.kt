@@ -5,6 +5,7 @@ import android.content.SharedPreferences
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.os.SystemClock
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -13,10 +14,10 @@ import kotlin.math.max
 import kotlin.math.roundToInt
 
 /**
- * Legacy class name kept to avoid widening the change surface.
- * This is now a single 13 mm manual shoulder trigger that can be bound to R or L.
- * PixelTrigger owns only the physical-style R/L press duration; GameSpace/Shoulder
- * Triggers decides what the selected shoulder button actually does.
+ * Single manual 13 mm shoulder trigger.
+ * The visible circle is also the touch window: there is no larger invisible hit box.
+ * While enabled and visible it reserves the selected shoulder side so the automatic
+ * R/L detector cannot feed back on screen changes produced by the GameSpace macro.
  */
 internal class ManualNubiaPairController(
     private val context: Context,
@@ -35,6 +36,7 @@ internal class ManualNubiaPairController(
     private var screenWidth = 1
     private var screenHeight = 1
     private var circle: Circle? = null
+    private var lastFireAtMs = 0L
     private var binding: Binding = when (preferences.getString(KEY_BINDING, Binding.R.name)) {
         Binding.L.name -> Binding.L
         else -> Binding.R
@@ -56,18 +58,17 @@ internal class ManualNubiaPairController(
         screenHeight = height.coerceAtLeast(1)
 
         val triggerDiameter = mmToPx(TRIGGER_DIAMETER_MM)
-        val triggerWindow = max(triggerDiameter + dp(8), dp(52))
         val view = ManualCircleView(context, triggerDiameter)
         val params = WindowManager.LayoutParams(
-            triggerWindow,
-            triggerWindow,
+            triggerDiameter,
+            triggerDiameter,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             baseFlags(),
             android.graphics.PixelFormat.TRANSLUCENT,
         ).apply {
             gravity = Gravity.TOP or Gravity.START
             x = preferences.getInt(KEY_TRIGGER_X, dp(16))
-            y = preferences.getInt(KEY_TRIGGER_Y, screenHeight / 2 - triggerWindow / 2)
+            y = preferences.getInt(KEY_TRIGGER_Y, screenHeight / 2 - triggerDiameter / 2)
         }
         val created = Circle(view, params, KEY_TRIGGER_X, KEY_TRIGGER_Y)
         clamp(params)
@@ -129,6 +130,7 @@ internal class ManualNubiaPairController(
     }
 
     fun destroy() {
+        ShoulderCaptureService.clearManualReservation()
         circle?.let { runCatching { windowManager.removeView(it.view) } }
         circle = null
     }
@@ -142,8 +144,14 @@ internal class ManualNubiaPairController(
                 if (!isEnabled || !isVisible) return@setOnTouchListener false
                 when (event.actionMasked) {
                     MotionEvent.ACTION_DOWN -> {
-                        if (!firedForContact) {
+                        if (!view.containsVisibleCircle(event.x, event.y)) {
+                            firedForContact = false
+                            return@setOnTouchListener false
+                        }
+                        val now = SystemClock.elapsedRealtime()
+                        if (!firedForContact && now - lastFireAtMs >= MIN_FIRE_INTERVAL_MS) {
                             firedForContact = true
+                            lastFireAtMs = now
                             fireLinkedShoulder()
                         }
                         true
@@ -196,6 +204,18 @@ internal class ManualNubiaPairController(
         current.params.flags = if (touchable) baseFlags()
         else baseFlags() or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
         runCatching { windowManager.updateViewLayout(current.view, current.params) }
+        updateManualReservation()
+    }
+
+    private fun updateManualReservation() {
+        if (!isEnabled || !isVisible) {
+            ShoulderCaptureService.clearManualReservation()
+            return
+        }
+        when (binding) {
+            Binding.R -> ShoulderCaptureService.reserveManualR()
+            Binding.L -> ShoulderCaptureService.reserveManualL()
+        }
     }
 
     private fun save(current: Circle) {
@@ -249,6 +269,15 @@ internal class ManualNubiaPairController(
             invalidate()
         }
 
+        fun containsVisibleCircle(x: Float, y: Float): Boolean {
+            val cx = width / 2f
+            val cy = height / 2f
+            val radius = (diameter / 2f).coerceAtLeast(1f)
+            val dx = x - cx
+            val dy = y - cy
+            return dx * dx + dy * dy <= radius * radius
+        }
+
         override fun performClick(): Boolean {
             super.performClick()
             return true
@@ -279,8 +308,8 @@ internal class ManualNubiaPairController(
 
     companion object {
         private const val TRIGGER_DIAMETER_MM = 13f
+        private const val MIN_FIRE_INTERVAL_MS = 120L
 
-        // Reuse the old trigger position/visibility keys so upgrading keeps the user's placement.
         private const val KEY_ENABLED = "manual_pair_enabled"
         private const val KEY_VISIBLE = "manual_pair_visible"
         private const val KEY_TRIGGER_X = "manual_pair_trigger_x"

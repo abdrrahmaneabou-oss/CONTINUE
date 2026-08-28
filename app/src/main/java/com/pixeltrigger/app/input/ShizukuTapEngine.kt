@@ -42,7 +42,7 @@ class ShizukuTapEngine(private val context: Context) : TapEngine {
         .daemon(true)
         .tag("pixeltrigger-input-v9-single-shot")
         // Force Shizuku to discard the daemon from the broken synchronous build.
-        .version(11)
+        .version(12)
 
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
@@ -161,6 +161,29 @@ class ShizukuTapEngine(private val context: Context) : TapEngine {
         }
     }
 
+    /** One non-blocking Binder submit for the independent two-target manual module. */
+    fun firePairFast(
+        firstX: Float,
+        firstY: Float,
+        secondX: Float,
+        secondY: Float,
+        displayId: Int = 0,
+    ): Boolean {
+        val triggerId = ++fastTriggerId
+        val service = remote ?: run {
+            queuePendingPair(triggerId, firstX, firstY, secondX, secondY, displayId)
+            return false
+        }
+        return try {
+            service.injectTapPairFast(triggerId, firstX, firstY, secondX, secondY, displayId)
+            lastFireStatus = ShizukuInputUserService.STATUS_OK
+            true
+        } catch (failure: Throwable) {
+            queuePendingPair(triggerId, firstX, firstY, secondX, secondY, displayId, failure)
+            false
+        }
+    }
+
     /** Compatibility path retained for non-hot-path callers/tests. */
     override fun tap(request: TapRequest): TapResult {
         val acceptedAt = SystemClock.elapsedRealtimeNanos()
@@ -194,6 +217,8 @@ class ShizukuTapEngine(private val context: Context) : TapEngine {
         val x: Float,
         val y: Float,
         val displayId: Int,
+        val secondX: Float = Float.NaN,
+        val secondY: Float = Float.NaN,
     )
 
     @Volatile private var pendingFire: PendingFire? = null
@@ -222,11 +247,48 @@ class ShizukuTapEngine(private val context: Context) : TapEngine {
         scheduleReconnect()
     }
 
+    private fun queuePendingPair(
+        triggerId: Long,
+        firstX: Float,
+        firstY: Float,
+        secondX: Float,
+        secondY: Float,
+        displayId: Int,
+        failure: Throwable? = null,
+    ) {
+        pendingFire = PendingFire(triggerId, firstX, firstY, displayId, secondX, secondY)
+        remote = null
+        hotPathReady = false
+        capability = InputCapability.DISCONNECTED
+        lastFireStatus = if (failure == null) {
+            ShizukuInputUserService.STATUS_NOT_READY
+        } else {
+            ShizukuInputUserService.STATUS_EXCEPTION
+        }
+        capabilityDetail = if (failure == null) {
+            "Nubia tap pair waiting for UserService connection"
+        } else {
+            "Nubia tap pair Binder interrupted: ${failure.message ?: failure.javaClass.simpleName}"
+        }
+        scheduleReconnect()
+    }
+
     private fun flushPendingFire() {
         val shot = pendingFire ?: return
         val service = remote ?: return
         try {
-            service.injectTapFast(shot.triggerId, shot.x, shot.y, shot.displayId)
+            if (shot.secondX.isFinite() && shot.secondY.isFinite()) {
+                service.injectTapPairFast(
+                    shot.triggerId,
+                    shot.x,
+                    shot.y,
+                    shot.secondX,
+                    shot.secondY,
+                    shot.displayId,
+                )
+            } else {
+                service.injectTapFast(shot.triggerId, shot.x, shot.y, shot.displayId)
+            }
             if (pendingFire === shot) pendingFire = null
             lastFireStatus = ShizukuInputUserService.STATUS_OK
         } catch (failure: Throwable) {

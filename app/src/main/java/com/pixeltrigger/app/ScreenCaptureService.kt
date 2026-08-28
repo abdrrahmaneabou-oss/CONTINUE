@@ -78,6 +78,8 @@ class ScreenCaptureService : Service() {
     private var targetParams: WindowManager.LayoutParams? = null
     private var targetTouchSize = 1
 
+    private lateinit var manualTapPair: ManualNubiaPairController
+
     private var menuButton: TextView? = null
     private var menuButtonParams: WindowManager.LayoutParams? = null
     private var menuPanel: View? = null
@@ -294,6 +296,9 @@ class ScreenCaptureService : Service() {
             preferences.edit().putInt(KEY_TARGET_X, x).putInt(KEY_TARGET_Y, y).apply()
         }
 
+        manualTapPair = ManualNubiaPairController(this, windowManager, preferences, tapEngine)
+        manualTapPair.create(screenWidth, screenHeight)
+
         val buttonSize = dp(50)
         val button = TextView(this).apply {
             text = "${activeGroup + 1}"
@@ -342,7 +347,7 @@ class ScreenCaptureService : Service() {
     private fun attachFloatingButtonGesture(view: View, params: WindowManager.LayoutParams) {
         var longPressTriggered = false
         val holdRunnable = Runnable {
-            if (!circleEditMode) {
+            if (!circleEditMode && (!::manualTapPair.isInitialized || !manualTapPair.isEditing)) {
                 longPressTriggered = true
                 toggleAllEngines()
             }
@@ -376,7 +381,9 @@ class ScreenCaptureService : Service() {
             override fun onDoubleTap(e: MotionEvent): Boolean {
                 mainHandler.removeCallbacks(holdRunnable)
                 if (longPressTriggered) return true
-                if (circleEditMode) finishCirclePositionEditing() else switchToNextGroup()
+                if (::manualTapPair.isInitialized && manualTapPair.isEditing) toggleMenu()
+                else if (circleEditMode) finishCirclePositionEditing()
+                else switchToNextGroup()
                 return true
             }
 
@@ -509,31 +516,35 @@ class ScreenCaptureService : Service() {
     private fun toggleLeftEngine() = setLeftEngineEnabled(!shoulderHalfEnabled)
 
     private fun toggleAllEngines() {
-        val anyHalfEnabled = engineEnabled || shoulderHalfEnabled
-        val targetEnabled = !anyHalfEnabled
+        val manualEnabled = ::manualTapPair.isInitialized && manualTapPair.isEnabled
+        val anythingEnabled = engineEnabled || shoulderHalfEnabled || manualEnabled
+        val targetEnabled = !anythingEnabled
         setRightEngineEnabled(targetEnabled)
         setLeftEngineEnabled(targetEnabled)
+        if (::manualTapPair.isInitialized) manualTapPair.setEnabled(targetEnabled)
+        updateButtonVisual()
         showMessage(if (targetEnabled) "PixelTrigger V5 ON" else "PixelTrigger V5 OFF")
     }
 
     private fun updateButtonVisual() {
         val button = menuButton ?: return
         val state = detectionEngines[activeGroup].state
-        val bothHalvesOff = !engineEnabled && !shoulderHalfEnabled
+        val manualOff = !::manualTapPair.isInitialized || !manualTapPair.isEnabled
+        val everythingOff = !engineEnabled && !shoulderHalfEnabled && manualOff
         val fill = when {
-            circleEditMode -> Color.rgb(30, 165, 92)
-            bothHalvesOff -> Color.rgb(95, 95, 104)
+            circleEditMode || (::manualTapPair.isInitialized && manualTapPair.isEditing) -> Color.rgb(30, 165, 92)
+            everythingOff -> Color.rgb(95, 95, 104)
             !engineEnabled -> Color.rgb(122, 92, 55)
             tapEngine.capability != InputCapability.CONCURRENT_TOUCH_SAFE -> Color.rgb(165, 70, 190)
             state == DetectionEngine.State.ARMED -> Color.rgb(32, 170, 88)
             else -> Color.rgb(79, 52, 185)
         }
         button.text = when {
-            circleEditMode -> "✓"
-            bothHalvesOff -> "OFF"
+            circleEditMode || (::manualTapPair.isInitialized && manualTapPair.isEditing) -> "✓"
+            everythingOff -> "OFF"
             else -> "${activeGroup + 1}"
         }
-        button.textSize = if (bothHalvesOff) 10f else 17f
+        button.textSize = if (everythingOff) 10f else 17f
         button.background = roundedBackground(fill, Color.rgb(155, 135, 255), 18f)
     }
 
@@ -605,6 +616,45 @@ class ScreenCaptureService : Service() {
             LinearLayout.LayoutParams(0, dp(58), 1f),
         )
         content.addView(halvesRow, matchWrap(dp(60)))
+
+        if (::manualTapPair.isInitialized) {
+            content.addView(sectionLabel("NUBIA  •  MANUAL 2-TAP", Color.rgb(155, 95, 25)), matchWrap())
+            val manualRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            manualRow.addView(
+                microCard(if (manualTapPair.isEnabled) "■ إيقاف" else "▶ تشغيل") {
+                    manualTapPair.toggleEnabled()
+                    updateButtonVisual()
+                    closeMenu()
+                },
+                LinearLayout.LayoutParams(0, dp(38), 1f),
+            )
+            manualRow.addView(
+                microCard("✥ تعديل") {
+                    closeMenu()
+                    manualTapPair.beginEditing()
+                    updateButtonVisual()
+                    showMessage("حرّك دوائر Nubia الثلاث ثم افتح القائمة واضغط حفظ")
+                },
+                LinearLayout.LayoutParams(0, dp(38), 1f),
+            )
+            manualRow.addView(
+                microCard("✓ حفظ") {
+                    manualTapPair.finishEditing()
+                    updateButtonVisual()
+                    closeMenu()
+                    showMessage("تم حفظ مواضع دوائر Nubia")
+                },
+                LinearLayout.LayoutParams(0, dp(38), 1f),
+            )
+            manualRow.addView(
+                microCard(if (manualTapPair.isVisible) "◉ إخفاء" else "○ إظهار") {
+                    manualTapPair.toggleVisible()
+                    closeMenu()
+                },
+                LinearLayout.LayoutParams(0, dp(38), 1f),
+            )
+            content.addView(manualRow, matchWrap(dp(40)))
+        }
 
         content.addView(sectionLabel("SHOULDER  •  R / L", Color.rgb(150, 49, 76)), matchWrap())
         content.addView(shoulderControlCard(), matchWrap())
@@ -725,13 +775,27 @@ class ScreenCaptureService : Service() {
         setOnClickListener { action() }
     }
 
+    private fun microCard(label: String, action: () -> Unit): TextView = TextView(this).apply {
+        text = label
+        textSize = 9.5f
+        gravity = Gravity.CENTER
+        setTextColor(Color.rgb(65, 48, 24))
+        setPadding(dp(2), dp(2), dp(2), dp(2))
+        background = roundedBackground(Color.rgb(255, 243, 220), Color.rgb(205, 143, 55), 8f)
+        isClickable = true
+        isFocusable = true
+        setOnClickListener { action() }
+    }
+
     private fun shoulderAction(actionValue: String) {
         runCatching { startService(Intent(this, ShoulderCaptureService::class.java).apply { action = actionValue }) }
         closeMenu()
     }
 
-    private fun combinedStatusText(): String =
-        "PixelProbe: ${engineStatusText()}  •  R/L: ${ShoulderCaptureService.statusSummary()}"
+    private fun combinedStatusText(): String {
+        val manual = if (::manualTapPair.isInitialized && manualTapPair.isEnabled) "2-TAP ON" else "2-TAP OFF"
+        return "PixelProbe: ${engineStatusText()}  •  R/L: ${ShoulderCaptureService.statusSummary()}  •  $manual"
+    }
 
     private fun engineStatusText(): String = when {
         !engineEnabled -> "OFF"
@@ -848,6 +912,7 @@ class ScreenCaptureService : Service() {
         targetParams?.let { lp ->
             targetView?.let { runCatching { windowManager.updateViewLayout(it, lp) } }
         }
+        if (::manualTapPair.isInitialized) manualTapPair.updateBounds(screenWidth, screenHeight)
         menuButtonParams?.let { lp ->
             clampPosition(lp)
             menuButton?.let { runCatching { windowManager.updateViewLayout(it, lp) } }
@@ -970,6 +1035,7 @@ class ScreenCaptureService : Service() {
         closeMenu()
         sensorViews.forEach { it?.let { view -> runCatching { windowManager.removeView(view) } } }
         targetView?.let { runCatching { windowManager.removeView(it) } }
+        if (::manualTapPair.isInitialized) manualTapPair.destroy()
         menuButton?.let { runCatching { windowManager.removeView(it) } }
         virtualDisplay?.release()
         imageReader?.close()

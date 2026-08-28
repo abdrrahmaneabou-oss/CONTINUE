@@ -61,25 +61,59 @@ class ShizukuInputUserService : IShizukuInputService.Stub {
      * thread immediately; the exact Nubia virtualTouchEvent path stays here.
      */
     override fun injectTapFast(triggerId: Long, x: Float, y: Float, displayId: Int) {
-        lastRequestReceivedNs = SystemClock.elapsedRealtimeNanos()
-        runCatching { Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_DISPLAY) }
-
-        if (Process.myUid() != SHELL_UID) {
-            detail = "tap ignored: UserService uid=${Process.myUid()}"
-            return
-        }
         if (triggerId <= 0L || !x.isFinite() || !y.isFinite()) {
             detail = "tap ignored: invalid argument"
             return
         }
-
-        val injector = nubiaInjector ?: run {
-            detail = "tap ignored: Nubia injector unavailable"
-            return
-        }
+        val injector = beginRequest() ?: return
         @Suppress("UNUSED_VARIABLE")
         val ignoredDisplayId = displayId // Nubia owns internal-display coordinate translation.
+        sendNubiaTap(injector, x, y)
+    }
 
+    /** One Binder submit performs both Nubia taps in a strictly ordered sequence. */
+    override fun injectTapPairFast(
+        triggerId: Long,
+        firstX: Float,
+        firstY: Float,
+        secondX: Float,
+        secondY: Float,
+        displayId: Int,
+    ) {
+        if (
+            triggerId <= 0L ||
+            !firstX.isFinite() || !firstY.isFinite() ||
+            !secondX.isFinite() || !secondY.isFinite()
+        ) {
+            detail = "tap pair ignored: invalid argument"
+            return
+        }
+        val injector = beginRequest() ?: return
+        @Suppress("UNUSED_VARIABLE")
+        val ignoredDisplayId = displayId
+
+        sendNubiaTap(injector, firstX, firstY)
+        val secondDeadlineNs = SystemClock.elapsedRealtimeNanos() + PAIR_GAP_NS
+        while (SystemClock.elapsedRealtimeNanos() < secondDeadlineNs) {
+            // Deliberate 2 ms release gap between the two Nubia contacts.
+        }
+        sendNubiaTap(injector, secondX, secondY)
+    }
+
+    private fun beginRequest(): NubiaVirtualTouchInjector? {
+        lastRequestReceivedNs = SystemClock.elapsedRealtimeNanos()
+        runCatching { Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_DISPLAY) }
+        if (Process.myUid() != SHELL_UID) {
+            detail = "tap ignored: UserService uid=${Process.myUid()}"
+            return null
+        }
+        return nubiaInjector ?: run {
+            detail = "tap ignored: Nubia injector unavailable"
+            null
+        }
+    }
+
+    private fun sendNubiaTap(injector: NubiaVirtualTouchInjector, x: Float, y: Float) {
         val px = x.roundToInt()
         val py = y.roundToInt()
         var downSent = false
@@ -234,6 +268,7 @@ class ShizukuInputUserService : IShizukuInputService.Stub {
     companion object {
         const val SHELL_UID = 2000
         const val TAP_DURATION_NS = 1_000_000L
+        const val PAIR_GAP_NS = 2_000_000L
 
         const val VIRTUAL_KEYCODE = -4
         const val ACTION_DOWN = 0

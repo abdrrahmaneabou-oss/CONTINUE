@@ -8,5 +8,6 @@ interface IShizukuInputService {
     long getLastDownNs() = 5;
     long getLastUpNs() = 6;
     String getLatencyDetail() = 7;
+    oneway void injectTapPairFast(long triggerId, float firstX, float firstY, float secondX, float secondY, int displayId) = 8;
     void destroy() = 16777114;
 }

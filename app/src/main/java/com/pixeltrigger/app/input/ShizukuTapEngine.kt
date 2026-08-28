@@ -8,6 +8,7 @@ import android.os.IBinder
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import java.util.concurrent.atomic.AtomicBoolean
 import rikka.shizuku.Shizuku
 
 /** App-side, no-root Shizuku tap backend. No Accessibility fallback is used silently. */
@@ -28,6 +29,11 @@ class ShizukuTapEngine(private val context: Context) : TapEngine {
     // FIRE is produced only by the capture thread, so this counter needs no AtomicLong.
     private var fastTriggerId: Long = 0L
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val reconnectScheduled = AtomicBoolean(false)
+    private val reconnectRunnable = Runnable {
+        reconnectScheduled.set(false)
+        if (!closed) connect()
+    }
 
     private val args = Shizuku.UserServiceArgs(
         ComponentName(context.packageName, ShizukuInputUserService::class.java.name),
@@ -40,6 +46,8 @@ class ShizukuTapEngine(private val context: Context) : TapEngine {
 
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
+            reconnectScheduled.set(false)
+            mainHandler.removeCallbacks(reconnectRunnable)
             binding = false
             remote = IShizukuInputService.Stub.asInterface(service)
             refreshCapability()
@@ -52,7 +60,7 @@ class ShizukuTapEngine(private val context: Context) : TapEngine {
             capability = InputCapability.DISCONNECTED
             capabilityDetail = "Shizuku UserService disconnected"
             lastFireStatus = ShizukuInputUserService.STATUS_NOT_READY
-            if (!closed) mainHandler.post { connect() }
+            scheduleReconnect()
         }
     }
 
@@ -130,7 +138,7 @@ class ShizukuTapEngine(private val context: Context) : TapEngine {
         val service = remote ?: run {
             hotPathReady = false
             lastFireStatus = ShizukuInputUserService.STATUS_NOT_READY
-            if (!closed) mainHandler.post { connect() }
+            scheduleReconnect()
             return false
         }
         val triggerId = ++fastTriggerId
@@ -152,7 +160,7 @@ class ShizukuTapEngine(private val context: Context) : TapEngine {
             capability = InputCapability.DISCONNECTED
             lastFireStatus = ShizukuInputUserService.STATUS_EXCEPTION
             capabilityDetail = "FIRE binder error: ${failure.message ?: failure.javaClass.simpleName}"
-            if (!closed) mainHandler.post { connect() }
+            scheduleReconnect()
             false
         }
     }
@@ -189,13 +197,23 @@ class ShizukuTapEngine(private val context: Context) : TapEngine {
         return runCatching { service.latencyDetail }.getOrDefault("latency: unavailable")
     }
 
+    private fun scheduleReconnect() {
+        if (closed || !reconnectScheduled.compareAndSet(false, true)) return
+        mainHandler.postDelayed(reconnectRunnable, RECONNECT_DELAY_MS)
+    }
+
     fun disconnect() {
         closed = true
+        reconnectScheduled.set(false)
         mainHandler.removeCallbacksAndMessages(null)
         runCatching { Shizuku.unbindUserService(args, connection, false) }
         remote = null
         hotPathReady = false
         binding = false
         capability = InputCapability.DISCONNECTED
+    }
+
+    companion object {
+        private const val RECONNECT_DELAY_MS = 50L
     }
 }

@@ -7,6 +7,7 @@ import android.content.pm.PackageManager
 import android.os.IBinder
 import android.os.Handler
 import android.os.Looper
+import java.util.concurrent.atomic.AtomicBoolean
 import rikka.shizuku.Shizuku
 
 /** App-side bridge for the independent V5 shoulder half. */
@@ -21,6 +22,11 @@ class ShoulderShizukuEngine(private val context: Context) {
         private set
 
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val reconnectScheduled = AtomicBoolean(false)
+    private val reconnectRunnable = Runnable {
+        reconnectScheduled.set(false)
+        if (!closed) connect()
+    }
 
     private val args = Shizuku.UserServiceArgs(
         ComponentName(context.packageName, ShoulderInputUserService::class.java.name),
@@ -34,6 +40,8 @@ class ShoulderShizukuEngine(private val context: Context) {
 
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
+            reconnectScheduled.set(false)
+            mainHandler.removeCallbacks(reconnectRunnable)
             binding = false
             remote = IShoulderInputService.Stub.asInterface(service)
             val backend = remote
@@ -59,7 +67,7 @@ class ShoulderShizukuEngine(private val context: Context) {
             ready = false
             status = "Shoulder UserService disconnected"
             lastFireResult = FIRE_NOT_CONNECTED
-            if (!closed) mainHandler.post { connect() }
+            scheduleReconnect()
         }
     }
 
@@ -110,7 +118,7 @@ class ShoulderShizukuEngine(private val context: Context) {
             ready = false
             lastFireResult = FIRE_NOT_CONNECTED
             status = "Shoulder FIRE waiting for UserService reconnect"
-            mainHandler.post { connect() }
+            scheduleReconnect()
             return false
         }
         return try {
@@ -129,7 +137,7 @@ class ShoulderShizukuEngine(private val context: Context) {
             ready = false
             lastFireResult = FIRE_BINDER_ERROR
             status = "Shoulder FIRE binder error: ${failure.message ?: failure.javaClass.simpleName}"
-            mainHandler.post { connect() }
+            scheduleReconnect()
             false
         }
     }
@@ -146,8 +154,14 @@ class ShoulderShizukuEngine(private val context: Context) {
             .getOrDefault(false)
     }
 
+    private fun scheduleReconnect() {
+        if (closed || !reconnectScheduled.compareAndSet(false, true)) return
+        mainHandler.postDelayed(reconnectRunnable, RECONNECT_DELAY_MS)
+    }
+
     fun disconnect() {
         closed = true
+        reconnectScheduled.set(false)
         mainHandler.removeCallbacksAndMessages(null)
         runCatching { Shizuku.unbindUserService(args, connection, false) }
         remote = null
@@ -158,5 +172,6 @@ class ShoulderShizukuEngine(private val context: Context) {
     companion object {
         const val FIRE_NOT_CONNECTED = Int.MIN_VALUE
         const val FIRE_BINDER_ERROR = Int.MIN_VALUE + 1
+        private const val RECONNECT_DELAY_MS = 50L
     }
 }

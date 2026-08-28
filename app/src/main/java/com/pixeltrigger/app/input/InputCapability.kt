@@ -1,0 +1,11 @@
+package com.pixeltrigger.app.input
+
+enum class InputCapability {
+    DISCONNECTED,
+    PERMISSION_REQUIRED,
+    ROOT_REJECTED,
+    INJECT_EVENTS_UNAVAILABLE,
+    CONCURRENT_TOUCH_UNKNOWN,
+    CONCURRENT_TOUCH_UNSAFE,
+    CONCURRENT_TOUCH_SAFE,
+}

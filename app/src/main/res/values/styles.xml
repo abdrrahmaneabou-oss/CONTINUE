@@ -1,0 +1,7 @@
+<resources>
+    <style name="Theme.PixelTrigger" parent="Theme.AppCompat.DayNight.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:colorAccent">#7557FF</item>
+    </style>
+</resources>

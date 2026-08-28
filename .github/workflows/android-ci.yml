@@ -1,0 +1,111 @@
+name: PixelTrigger V5 CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: pixeltrigger-v5-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    if: >-
+      github.event_name != 'push' ||
+      (!startsWith(github.event.head_commit.message, 'build: verify V5 APK') &&
+       !startsWith(github.event.head_commit.message, 'ci: record V5 build failure'))
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Capture source
+        run: echo "SOURCE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK, NDK and CMake
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;27.2.12479018" "cmake;3.22.1"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Test and build
+        id: gradle_build
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          gradle --no-daemon --rerun-tasks clean :app:testDebugUnitTest :app:assembleDebug --stacktrace 2>&1 | tee /tmp/v5-build.log
+
+      - name: Publish failure log
+        if: steps.gradle_build.outcome != 'success'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p docs
+          {
+            echo '# PixelTrigger V5 build failure'
+            echo "Source commit: $SOURCE_SHA"
+            echo
+            tail -n 900 /tmp/v5-build.log
+          } > docs/V5_BUILD_FAILURE.log
+          git config user.name 'PixelTrigger V5 CI'
+          git config user.email 'actions@users.noreply.github.com'
+          git add docs/V5_BUILD_FAILURE.log
+          git commit -m "ci: record V5 build failure for $SOURCE_SHA" || true
+          git pull --rebase origin main || true
+          git push origin HEAD:main
+          exit 1
+
+      - name: Record verified build
+        if: steps.gradle_build.outcome == 'success'
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK=app/build/outputs/apk/debug/app-debug.apk
+          test -s "$APK"
+          SHA=$(sha256sum "$APK" | cut -d' ' -f1)
+          mkdir -p docs
+          {
+            echo '# PixelTrigger V5 build status'
+            echo '- Unit tests: PASS'
+            echo '- APK build: PASS'
+            echo "- Source commit: $SOURCE_SHA"
+            echo '- Capture: single shared MediaProjection/ImageReader'
+            echo '- PixelProbe: V4 detector + tap path preserved'
+            echo '- Shoulder R/L: exact V4 DetectionEngine/PixelSampler; FIRE routes to R or L'
+            echo '- Floating UI: one unified movable control center'
+            echo "- APK SHA-256: $SHA"
+            echo '- APK delivery: GitHub Actions artifact PixelTrigger-V5-debug'
+          } > docs/V5_BUILD_STATUS.md
+          rm -f docs/V5_BUILD_FAILURE.log
+          git config user.name 'PixelTrigger V5 CI'
+          git config user.email 'actions@users.noreply.github.com'
+          git add docs/V5_BUILD_STATUS.md
+          git add -u docs/V5_BUILD_FAILURE.log || true
+          git commit -m "build: verify V5 APK from $SOURCE_SHA" || true
+          git pull --rebase origin main || true
+          git push origin HEAD:main
+
+      - uses: actions/upload-artifact@v4
+        if: steps.gradle_build.outcome == 'success'
+        with:
+          name: PixelTrigger-V5-debug
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error

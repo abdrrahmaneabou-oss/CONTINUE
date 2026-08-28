@@ -1,0 +1,2 @@
+PixelTrigger v4 PixelProbe CI trigger.
+Fixed 0.3 mm probe; 3-frame WHITE arming; first quorum departure fires.

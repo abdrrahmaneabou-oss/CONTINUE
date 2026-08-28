@@ -41,8 +41,8 @@ class ShizukuTapEngine(private val context: Context) : TapEngine {
         .processNameSuffix("pixeltrigger_input")
         .daemon(true)
         .tag("pixeltrigger-input-v9-single-shot")
-        // Force Shizuku to replace the old oneway/void daemon after APK update.
-        .version(10)
+        // Force Shizuku to discard the daemon from the broken synchronous build.
+        .version(11)
 
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
@@ -50,6 +50,7 @@ class ShizukuTapEngine(private val context: Context) : TapEngine {
             mainHandler.removeCallbacks(reconnectRunnable)
             binding = false
             remote = IShizukuInputService.Stub.asInterface(service)
+            flushPendingFire()
             refreshCapability()
         }
 
@@ -66,12 +67,17 @@ class ShizukuTapEngine(private val context: Context) : TapEngine {
 
     fun connect(): Boolean {
         closed = false
-        if (remote != null || binding) return true
+        if (remote != null) return true
+        if (binding) {
+            retryPendingConnection()
+            return true
+        }
         if (!Shizuku.pingBinder()) {
             binding = false
             hotPathReady = false
             capability = InputCapability.DISCONNECTED
             capabilityDetail = "Start Shizuku with Wireless debugging/ADB"
+            retryPendingConnection()
             return false
         }
         val uid = runCatching { Shizuku.getUid() }.getOrDefault(-1)
@@ -80,6 +86,7 @@ class ShizukuTapEngine(private val context: Context) : TapEngine {
             hotPathReady = false
             capability = InputCapability.ROOT_REJECTED
             capabilityDetail = "No-root policy: Shizuku must run as ADB shell UID 2000 (got $uid)"
+            retryPendingConnection()
             return false
         }
         if (Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED) {
@@ -87,6 +94,7 @@ class ShizukuTapEngine(private val context: Context) : TapEngine {
             hotPathReady = false
             capability = InputCapability.PERMISSION_REQUIRED
             capabilityDetail = "Shizuku permission required"
+            retryPendingConnection()
             return false
         }
         return runCatching {
@@ -98,6 +106,7 @@ class ShizukuTapEngine(private val context: Context) : TapEngine {
             hotPathReady = false
             capability = InputCapability.DISCONNECTED
             capabilityDetail = "bind failed: ${it.message ?: it.javaClass.simpleName}"
+            retryPendingConnection()
             false
         }
     }
@@ -131,36 +140,23 @@ class ShizukuTapEngine(private val context: Context) : TapEngine {
     fun isReady(): Boolean = remote != null && hotPathReady
 
     /**
-     * Fastest confirmed app-side path: one direct AIDL transaction. DOWN is sent
-     * before the reply, so confirmation does not add delay before the action.
+     * FIRE is never capability-gated. If Binder is connected, submit directly to
+     * Nubia even when a stale diagnostic flag says otherwise. If the connection
+     * vanished at this exact instant, retain this one shot and submit it as soon
+     * as the fresh UserService connects.
      */
     fun fireFast(x: Float, y: Float, displayId: Int = 0): Boolean {
+        val triggerId = ++fastTriggerId
         val service = remote ?: run {
-            hotPathReady = false
-            lastFireStatus = ShizukuInputUserService.STATUS_NOT_READY
-            scheduleReconnect()
+            queuePendingFire(triggerId, x, y, displayId)
             return false
         }
-        val triggerId = ++fastTriggerId
         return try {
-            val rc = service.injectTapFast(triggerId, x, y, displayId)
-            lastFireStatus = rc
-            if (rc == ShizukuInputUserService.STATUS_OK) {
-                hotPathReady = true
-                true
-            } else {
-                hotPathReady = false
-                capabilityDetail = runCatching { service.capabilityDetail }
-                    .getOrDefault("FIRE failed status=$rc")
-                false
-            }
+            service.injectTapFast(triggerId, x, y, displayId)
+            lastFireStatus = ShizukuInputUserService.STATUS_OK
+            true
         } catch (failure: Throwable) {
-            remote = null
-            hotPathReady = false
-            capability = InputCapability.DISCONNECTED
-            lastFireStatus = ShizukuInputUserService.STATUS_EXCEPTION
-            capabilityDetail = "FIRE binder error: ${failure.message ?: failure.javaClass.simpleName}"
-            scheduleReconnect()
+            queuePendingFire(triggerId, x, y, displayId, failure)
             false
         }
     }
@@ -171,22 +167,18 @@ class ShizukuTapEngine(private val context: Context) : TapEngine {
         val service = remote
             ?: return TapResult.Failed(request.triggerId, acceptedAt, "Shizuku input service disconnected")
         return runCatching {
-            val rc = service.injectTapFast(
+            service.injectTapFast(
                 request.triggerId,
                 request.x,
                 request.y,
                 request.displayId,
             )
-            if (rc == ShizukuInputUserService.STATUS_OK) {
-                TapResult.Completed(
-                    triggerId = request.triggerId,
-                    acceptedAtNs = acceptedAt,
-                    downSentAtNs = 0L,
-                    upSentAtNs = 0L,
-                )
-            } else {
-                TapResult.Failed(request.triggerId, acceptedAt, "backend rejected FIRE status=$rc")
-            }
+            TapResult.Completed(
+                triggerId = request.triggerId,
+                acceptedAtNs = acceptedAt,
+                downSentAtNs = 0L,
+                upSentAtNs = 0L,
+            )
         }.getOrElse {
             TapResult.Failed(request.triggerId, acceptedAt, "binder submit error: ${it.message ?: it.javaClass.simpleName}")
         }
@@ -197,9 +189,63 @@ class ShizukuTapEngine(private val context: Context) : TapEngine {
         return runCatching { service.latencyDetail }.getOrDefault("latency: unavailable")
     }
 
+    private data class PendingFire(
+        val triggerId: Long,
+        val x: Float,
+        val y: Float,
+        val displayId: Int,
+    )
+
+    @Volatile private var pendingFire: PendingFire? = null
+
+    private fun queuePendingFire(
+        triggerId: Long,
+        x: Float,
+        y: Float,
+        displayId: Int,
+        failure: Throwable? = null,
+    ) {
+        pendingFire = PendingFire(triggerId, x, y, displayId)
+        remote = null
+        hotPathReady = false
+        capability = InputCapability.DISCONNECTED
+        lastFireStatus = if (failure == null) {
+            ShizukuInputUserService.STATUS_NOT_READY
+        } else {
+            ShizukuInputUserService.STATUS_EXCEPTION
+        }
+        capabilityDetail = if (failure == null) {
+            "FIRE waiting for Nubia UserService connection"
+        } else {
+            "FIRE Binder interrupted; reconnecting: ${failure.message ?: failure.javaClass.simpleName}"
+        }
+        scheduleReconnect()
+    }
+
+    private fun flushPendingFire() {
+        val shot = pendingFire ?: return
+        val service = remote ?: return
+        try {
+            service.injectTapFast(shot.triggerId, shot.x, shot.y, shot.displayId)
+            if (pendingFire === shot) pendingFire = null
+            lastFireStatus = ShizukuInputUserService.STATUS_OK
+        } catch (failure: Throwable) {
+            remote = null
+            hotPathReady = false
+            capability = InputCapability.DISCONNECTED
+            lastFireStatus = ShizukuInputUserService.STATUS_EXCEPTION
+            capabilityDetail = "Pending FIRE Binder interrupted: ${failure.message ?: failure.javaClass.simpleName}"
+            scheduleReconnect()
+        }
+    }
+
     private fun scheduleReconnect() {
         if (closed || !reconnectScheduled.compareAndSet(false, true)) return
         mainHandler.postDelayed(reconnectRunnable, RECONNECT_DELAY_MS)
+    }
+
+    private fun retryPendingConnection() {
+        if (pendingFire != null) scheduleReconnect()
     }
 
     fun disconnect() {
@@ -208,6 +254,7 @@ class ShizukuTapEngine(private val context: Context) : TapEngine {
         mainHandler.removeCallbacksAndMessages(null)
         runCatching { Shizuku.unbindUserService(args, connection, false) }
         remote = null
+        pendingFire = null
         hotPathReady = false
         binding = false
         capability = InputCapability.DISCONNECTED

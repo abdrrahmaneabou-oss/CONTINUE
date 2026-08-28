@@ -139,21 +139,12 @@ class ShoulderCaptureService : Service() {
             is DetectionEngine.Event.ManualRearmed -> mainHandler.post { refreshSideStatus(side, inputReady) }
 
             is DetectionEngine.Event.Fired -> {
-                // Do not gate FIRE on a cached readiness bit. The direct binder
-                // call is the source of truth and returns only after KEY DOWN was
-                // accepted (or an explicit failure was returned).
-                val delivered = if (side == Side.R) {
-                    shoulderInput.fireR(pressDurationMs(Side.R))
-                } else {
-                    shoulderInput.fireL(pressDurationMs(Side.L))
-                }
-                if (delivered) {
-                    detector.confirmFireDelivery()
-                } else {
-                    detector.retryAfterFailedFire()
+                if (inputReady) {
+                    if (side == Side.R) shoulderInput.fireR(pressDurationMs(Side.R))
+                    else shoulderInput.fireL(pressDurationMs(Side.L))
                 }
                 mainHandler.post {
-                    setSideStatus(side, if (delivered) SensorStatus.FIRED else SensorStatus.INPUT_NOT_READY)
+                    setSideStatus(side, if (inputReady) SensorStatus.FIRED else SensorStatus.INPUT_NOT_READY)
                 }
             }
             else -> Unit

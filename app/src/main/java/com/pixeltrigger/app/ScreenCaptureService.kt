@@ -197,7 +197,14 @@ class ScreenCaptureService : Service() {
         }
 
     private fun processImage(image: Image) {
+        // The right-half FIRE pipeline always gets the newest frame first. The
+        // independent shoulder half must never delay the right detector or its
+        // one-way Nubia submission on a 144 Hz capture stream.
+        processRightFrame(image)
         ShoulderCaptureService.dispatchSharedFrame(image, screenWidth, screenHeight)
+    }
+
+    private fun processRightFrame(image: Image) {
         if (!engineEnabled || circleEditMode) return
 
         val inputReady = tapEngine.isReady()
@@ -218,14 +225,8 @@ class ScreenCaptureService : Service() {
             is DetectionEngine.Event.Rearmed,
             is DetectionEngine.Event.ManualRearmed -> refreshSensorStatus(inputReady)
             is DetectionEngine.Event.Fired -> {
-                val delivered = executeTapImmediately()
-                if (delivered) {
-                    detectionEngines[index].confirmFireDelivery()
-                    refreshSensorStatus(true, SensorStatus.FIRED)
-                } else {
-                    detectionEngines[index].retryAfterFailedFire()
-                    refreshSensorStatus(false, SensorStatus.INPUT_NOT_READY)
-                }
+                executeTapImmediately()
+                refreshSensorStatus(inputReady, SensorStatus.FIRED)
             }
             else -> Unit
         }
@@ -244,10 +245,10 @@ class ScreenCaptureService : Service() {
         return PixelSampler.sampleCircularRegion(image, centerX, centerY, radiusX, radiusY)
     }
 
-    private fun executeTapImmediately(): Boolean {
-        if (!engineEnabled) return false
-        val target = targetParams ?: return false
-        return tapEngine.fireFast(
+    private fun executeTapImmediately() {
+        if (!engineEnabled) return
+        val target = targetParams ?: return
+        tapEngine.fireFast(
             target.x + targetTouchSize / 2f,
             target.y + targetTouchSize / 2f,
             displayId = 0,

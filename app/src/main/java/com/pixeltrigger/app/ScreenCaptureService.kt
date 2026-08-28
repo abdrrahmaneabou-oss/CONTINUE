@@ -296,7 +296,7 @@ class ScreenCaptureService : Service() {
             preferences.edit().putInt(KEY_TARGET_X, x).putInt(KEY_TARGET_Y, y).apply()
         }
 
-        manualTapPair = ManualNubiaPairController(this, windowManager, preferences, tapEngine)
+        manualTapPair = ManualNubiaPairController(this, windowManager, preferences)
         manualTapPair.create(screenWidth, screenHeight)
 
         val buttonSize = dp(50)
@@ -618,7 +618,7 @@ class ScreenCaptureService : Service() {
         content.addView(halvesRow, matchWrap(dp(60)))
 
         if (::manualTapPair.isInitialized) {
-            content.addView(sectionLabel("NUBIA  •  MANUAL 2-TAP", Color.rgb(155, 95, 25)), matchWrap())
+            content.addView(sectionLabel("MANUAL  •  SHOULDER R/L", Color.rgb(155, 95, 25)), matchWrap())
             val manualRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
             manualRow.addView(
                 microCard(if (manualTapPair.isEnabled) "■ إيقاف" else "▶ تشغيل") {
@@ -633,7 +633,7 @@ class ScreenCaptureService : Service() {
                     closeMenu()
                     manualTapPair.beginEditing()
                     updateButtonVisual()
-                    showMessage("حرّك دوائر Nubia الثلاث ثم افتح القائمة واضغط حفظ")
+                    showMessage("حرّك دائرة R/L اليدوية ثم افتح القائمة واضغط حفظ")
                 },
                 LinearLayout.LayoutParams(0, dp(38), 1f),
             )
@@ -642,7 +642,7 @@ class ScreenCaptureService : Service() {
                     manualTapPair.finishEditing()
                     updateButtonVisual()
                     closeMenu()
-                    showMessage("تم حفظ مواضع دوائر Nubia")
+                    showMessage("تم حفظ موضع دائرة R/L اليدوية")
                 },
                 LinearLayout.LayoutParams(0, dp(38), 1f),
             )
@@ -654,6 +654,25 @@ class ScreenCaptureService : Service() {
                 LinearLayout.LayoutParams(0, dp(38), 1f),
             )
             content.addView(manualRow, matchWrap(dp(40)))
+
+            val bindRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            bindRow.addView(
+                microCard(if (manualTapPair.bindingLabel == "R") "● ربط بـ R" else "○ ربط بـ R") {
+                    manualTapPair.bindToR()
+                    closeMenu()
+                    showMessage("تم ربط الدائرة اليدوية بـ R")
+                },
+                LinearLayout.LayoutParams(0, dp(34), 1f),
+            )
+            bindRow.addView(
+                microCard(if (manualTapPair.bindingLabel == "L") "● ربط بـ L" else "○ ربط بـ L") {
+                    manualTapPair.bindToL()
+                    closeMenu()
+                    showMessage("تم ربط الدائرة اليدوية بـ L")
+                },
+                LinearLayout.LayoutParams(0, dp(34), 1f),
+            )
+            content.addView(bindRow, matchWrap(dp(36)))
         }
 
         content.addView(sectionLabel("SHOULDER  •  R / L", Color.rgb(150, 49, 76)), matchWrap())
@@ -793,7 +812,11 @@ class ScreenCaptureService : Service() {
     }
 
     private fun combinedStatusText(): String {
-        val manual = if (::manualTapPair.isInitialized && manualTapPair.isEnabled) "2-TAP ON" else "2-TAP OFF"
+        val manual = if (::manualTapPair.isInitialized) {
+            "MANUAL ${manualTapPair.bindingLabel} ${if (manualTapPair.isEnabled) "ON" else "OFF"}"
+        } else {
+            "MANUAL OFF"
+        }
         return "PixelProbe: ${engineStatusText()}  •  R/L: ${ShoulderCaptureService.statusSummary()}  •  $manual"
     }
 

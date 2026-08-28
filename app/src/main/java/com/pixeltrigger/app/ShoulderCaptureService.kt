@@ -139,12 +139,9 @@ class ShoulderCaptureService : Service() {
             is DetectionEngine.Event.ManualRearmed -> mainHandler.post { refreshSideStatus(side, inputReady) }
 
             is DetectionEngine.Event.Fired -> {
-                if (inputReady) {
-                    if (side == Side.R) shoulderInput.fireR(pressDurationMs(Side.R))
-                    else shoulderInput.fireL(pressDurationMs(Side.L))
-                }
+                val fired = inputReady && fireConfiguredSide(side)
                 mainHandler.post {
-                    setSideStatus(side, if (inputReady) SensorStatus.FIRED else SensorStatus.INPUT_NOT_READY)
+                    setSideStatus(side, if (fired) SensorStatus.FIRED else SensorStatus.INPUT_NOT_READY)
                 }
             }
             else -> Unit
@@ -168,6 +165,24 @@ class ShoulderCaptureService : Service() {
         val prefix = if (side == Side.R) "r" else "l"
         if (!prefs.getBoolean("shoulder_${prefix}_hold", false)) return 0
         return prefs.getInt("shoulder_${prefix}_seconds", 1).coerceIn(1, 5) * 1000
+    }
+
+    /**
+     * The single source of truth for firing a configured shoulder button.
+     * Both detector FIRE events and the manual 13 mm trigger use this exact path,
+     * so Flash/HOLD always comes from PixelTrigger's current R/L settings.
+     */
+    private fun fireConfiguredSide(side: Side): Boolean {
+        if (!::shoulderInput.isInitialized) return false
+        if (!shoulderInput.isReady()) {
+            shoulderInput.connect()
+            return false
+        }
+        return if (side == Side.R) {
+            shoulderInput.fireR(pressDurationMs(Side.R))
+        } else {
+            shoulderInput.fireL(pressDurationMs(Side.L))
+        }
     }
 
     private fun createOverlays() {
@@ -388,6 +403,11 @@ class ShoulderCaptureService : Service() {
         fun dispatchSharedFrame(image: Image, screenWidth: Int, screenHeight: Int) {
             activeInstance?.consumeSharedFrame(image, screenWidth, screenHeight)
         }
+
+        /** Manual overlay entry points. They intentionally bypass detector enable state. */
+        fun fireConfiguredR(): Boolean = activeInstance?.fireConfiguredSide(Side.R) ?: false
+
+        fun fireConfiguredL(): Boolean = activeInstance?.fireConfiguredSide(Side.L) ?: false
 
         fun statusSummary(): String = activeInstance?.summary() ?: "R/L starting…"
 

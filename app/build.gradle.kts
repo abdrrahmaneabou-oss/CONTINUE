@@ -11,8 +11,8 @@ android {
         applicationId = "com.pixeltrigger.app"
         minSdk = 29
         targetSdk = 35
-        versionCode = 53
-        versionName = "5.0-manual-nubia-pair"
+        versionCode = 54
+        versionName = "5.0-manual-shoulder-bind"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 

@@ -9,25 +9,23 @@ import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
-import com.pixeltrigger.app.input.ShizukuTapEngine
 import kotlin.math.max
 import kotlin.math.roundToInt
 
 /**
- * Independent three-circle manual module:
- * 10 mm trigger -> 3 mm target A -> short gap -> 3 mm target B.
- * It shares only the verified Nubia transport; no detector or shoulder state.
+ * Legacy class name kept to avoid widening the change surface.
+ * This is now a single 13 mm manual shoulder trigger that can be bound to R or L.
+ * PixelTrigger owns only the physical-style R/L press duration; GameSpace/Shoulder
+ * Triggers decides what the selected shoulder button actually does.
  */
 internal class ManualNubiaPairController(
     private val context: Context,
     private val windowManager: WindowManager,
     private val preferences: SharedPreferences,
-    private val tapEngine: ShizukuTapEngine,
 ) {
-    private enum class Role { TRIGGER, TARGET_A, TARGET_B }
+    private enum class Binding { R, L }
 
     private data class Circle(
-        val role: Role,
         val view: ManualCircleView,
         val params: WindowManager.LayoutParams,
         val keyX: String,
@@ -36,7 +34,11 @@ internal class ManualNubiaPairController(
 
     private var screenWidth = 1
     private var screenHeight = 1
-    private val circles = ArrayList<Circle>(3)
+    private var circle: Circle? = null
+    private var binding: Binding = when (preferences.getString(KEY_BINDING, Binding.R.name)) {
+        Binding.L.name -> Binding.L
+        else -> Binding.R
+    }
 
     var isEnabled: Boolean = preferences.getBoolean(KEY_ENABLED, true)
         private set
@@ -45,43 +47,33 @@ internal class ManualNubiaPairController(
     var isEditing: Boolean = false
         private set
 
+    val bindingLabel: String
+        get() = binding.name
+
     fun create(width: Int, height: Int) {
-        if (circles.isNotEmpty()) return
+        if (circle != null) return
         screenWidth = width.coerceAtLeast(1)
         screenHeight = height.coerceAtLeast(1)
 
         val triggerDiameter = mmToPx(TRIGGER_DIAMETER_MM)
-        val targetDiameter = mmToPx(TARGET_DIAMETER_MM)
-        val triggerWindow = max(triggerDiameter + dp(8), dp(48))
-        val targetWindow = max(targetDiameter + dp(20), dp(48))
-
-        addCircle(
-            role = Role.TRIGGER,
-            visibleDiameter = triggerDiameter,
-            windowSize = triggerWindow,
-            keyX = KEY_TRIGGER_X,
-            keyY = KEY_TRIGGER_Y,
-            defaultX = dp(16),
-            defaultY = screenHeight / 2 - triggerWindow / 2,
-        )
-        addCircle(
-            role = Role.TARGET_A,
-            visibleDiameter = targetDiameter,
-            windowSize = targetWindow,
-            keyX = KEY_TARGET_A_X,
-            keyY = KEY_TARGET_A_Y,
-            defaultX = screenWidth * 2 / 3 - targetWindow / 2,
-            defaultY = screenHeight / 2 - targetWindow - dp(12),
-        )
-        addCircle(
-            role = Role.TARGET_B,
-            visibleDiameter = targetDiameter,
-            windowSize = targetWindow,
-            keyX = KEY_TARGET_B_X,
-            keyY = KEY_TARGET_B_Y,
-            defaultX = screenWidth * 2 / 3 - targetWindow / 2,
-            defaultY = screenHeight / 2 + dp(12),
-        )
+        val triggerWindow = max(triggerDiameter + dp(8), dp(52))
+        val view = ManualCircleView(context, triggerDiameter)
+        val params = WindowManager.LayoutParams(
+            triggerWindow,
+            triggerWindow,
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            baseFlags(),
+            android.graphics.PixelFormat.TRANSLUCENT,
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            x = preferences.getInt(KEY_TRIGGER_X, dp(16))
+            y = preferences.getInt(KEY_TRIGGER_Y, screenHeight / 2 - triggerWindow / 2)
+        }
+        val created = Circle(view, params, KEY_TRIGGER_X, KEY_TRIGGER_Y)
+        clamp(params)
+        circle = created
+        windowManager.addView(view, params)
+        attachGesture(created)
         applyState()
     }
 
@@ -103,6 +95,16 @@ internal class ManualNubiaPairController(
 
     fun toggleVisible() = setVisible(!isVisible)
 
+    fun bindToR() = setBinding(Binding.R)
+
+    fun bindToL() = setBinding(Binding.L)
+
+    private fun setBinding(newBinding: Binding) {
+        binding = newBinding
+        preferences.edit().putString(KEY_BINDING, newBinding.name).apply()
+        applyState()
+    }
+
     fun beginEditing() {
         isVisible = true
         isEditing = true
@@ -113,64 +115,36 @@ internal class ManualNubiaPairController(
     fun finishEditing() {
         if (!isEditing) return
         isEditing = false
-        savePositions()
+        circle?.let(::save)
         applyState()
     }
 
     fun updateBounds(width: Int, height: Int) {
         screenWidth = width.coerceAtLeast(1)
         screenHeight = height.coerceAtLeast(1)
-        circles.forEach { circle ->
-            clamp(circle.params)
-            runCatching { windowManager.updateViewLayout(circle.view, circle.params) }
+        circle?.let { current ->
+            clamp(current.params)
+            runCatching { windowManager.updateViewLayout(current.view, current.params) }
         }
     }
 
     fun destroy() {
-        circles.forEach { runCatching { windowManager.removeView(it.view) } }
-        circles.clear()
+        circle?.let { runCatching { windowManager.removeView(it.view) } }
+        circle = null
     }
 
-    private fun addCircle(
-        role: Role,
-        visibleDiameter: Int,
-        windowSize: Int,
-        keyX: String,
-        keyY: String,
-        defaultX: Int,
-        defaultY: Int,
-    ) {
-        val view = ManualCircleView(context, role, visibleDiameter)
-        val params = WindowManager.LayoutParams(
-            windowSize,
-            windowSize,
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            baseFlags(),
-            android.graphics.PixelFormat.TRANSLUCENT,
-        ).apply {
-            gravity = Gravity.TOP or Gravity.START
-            x = preferences.getInt(keyX, defaultX)
-            y = preferences.getInt(keyY, defaultY)
-        }
-        val circle = Circle(role, view, params, keyX, keyY)
-        clamp(params)
-        circles.add(circle)
-        windowManager.addView(view, params)
-        attachGesture(circle)
-    }
-
-    private fun attachGesture(circle: Circle) {
+    private fun attachGesture(current: Circle) {
         var grabX = 0f
         var grabY = 0f
         var firedForContact = false
-        circle.view.setOnTouchListener { view, event ->
+        current.view.setOnTouchListener { view, event ->
             if (!isEditing) {
-                if (circle.role != Role.TRIGGER || !isEnabled || !isVisible) return@setOnTouchListener false
+                if (!isEnabled || !isVisible) return@setOnTouchListener false
                 when (event.actionMasked) {
                     MotionEvent.ACTION_DOWN -> {
                         if (!firedForContact) {
                             firedForContact = true
-                            firePair()
+                            fireLinkedShoulder()
                         }
                         true
                     }
@@ -184,21 +158,21 @@ internal class ManualNubiaPairController(
             } else {
                 when (event.actionMasked) {
                     MotionEvent.ACTION_DOWN -> {
-                        grabX = event.rawX - circle.params.x
-                        grabY = event.rawY - circle.params.y
+                        grabX = event.rawX - current.params.x
+                        grabY = event.rawY - current.params.y
                         true
                     }
                     MotionEvent.ACTION_MOVE -> {
-                        circle.params.x = (event.rawX - grabX).roundToInt()
-                        circle.params.y = (event.rawY - grabY).roundToInt()
-                        clamp(circle.params)
-                        runCatching { windowManager.updateViewLayout(circle.view, circle.params) }
+                        current.params.x = (event.rawX - grabX).roundToInt()
+                        current.params.y = (event.rawY - grabY).roundToInt()
+                        clamp(current.params)
+                        runCatching { windowManager.updateViewLayout(current.view, current.params) }
                         true
                     }
                     MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                        clamp(circle.params)
-                        runCatching { windowManager.updateViewLayout(circle.view, circle.params) }
-                        save(circle)
+                        clamp(current.params)
+                        runCatching { windowManager.updateViewLayout(current.view, current.params) }
+                        save(current)
                         true
                     }
                     else -> true
@@ -207,35 +181,27 @@ internal class ManualNubiaPairController(
         }
     }
 
-    private fun firePair() {
-        val first = circles.firstOrNull { it.role == Role.TARGET_A } ?: return
-        val second = circles.firstOrNull { it.role == Role.TARGET_B } ?: return
-        tapEngine.firePairFast(
-            first.params.x + first.params.width / 2f,
-            first.params.y + first.params.height / 2f,
-            second.params.x + second.params.width / 2f,
-            second.params.y + second.params.height / 2f,
-            displayId = 0,
-        )
-    }
-
-    private fun applyState() {
-        circles.forEach { circle ->
-            circle.view.visibility = if (isVisible) View.VISIBLE else View.INVISIBLE
-            circle.view.setState(isEnabled, isEditing)
-            val touchable = isEditing || (circle.role == Role.TRIGGER && isEnabled && isVisible)
-            circle.params.flags = if (touchable) baseFlags()
-            else baseFlags() or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
-            runCatching { windowManager.updateViewLayout(circle.view, circle.params) }
+    private fun fireLinkedShoulder() {
+        when (binding) {
+            Binding.R -> ShoulderCaptureService.fireConfiguredR()
+            Binding.L -> ShoulderCaptureService.fireConfiguredL()
         }
     }
 
-    private fun savePositions() = circles.forEach(::save)
+    private fun applyState() {
+        val current = circle ?: return
+        current.view.visibility = if (isVisible) View.VISIBLE else View.INVISIBLE
+        current.view.setState(isEnabled, isEditing, binding.name)
+        val touchable = isEditing || (isEnabled && isVisible)
+        current.params.flags = if (touchable) baseFlags()
+        else baseFlags() or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+        runCatching { windowManager.updateViewLayout(current.view, current.params) }
+    }
 
-    private fun save(circle: Circle) {
+    private fun save(current: Circle) {
         preferences.edit()
-            .putInt(circle.keyX, circle.params.x)
-            .putInt(circle.keyY, circle.params.y)
+            .putInt(current.keyX, current.params.x)
+            .putInt(current.keyY, current.params.y)
             .apply()
     }
 
@@ -259,7 +225,6 @@ internal class ManualNubiaPairController(
 
     private class ManualCircleView(
         context: Context,
-        private val role: Role,
         private val diameter: Int,
     ) : View(context) {
         private val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -267,12 +232,20 @@ internal class ManualNubiaPairController(
             strokeWidth = dp(2).toFloat()
         }
         private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+        private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.FILL
+            textAlign = Paint.Align.CENTER
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+            textSize = dp(11).toFloat()
+        }
         private var enabled = true
         private var editing = false
+        private var binding = Binding.R.name
 
-        fun setState(isEnabled: Boolean, isEditing: Boolean) {
+        fun setState(isEnabled: Boolean, isEditing: Boolean, bindingName: String) {
             enabled = isEnabled
             editing = isEditing
+            binding = bindingName
             invalidate()
         }
 
@@ -286,24 +259,18 @@ internal class ManualNubiaPairController(
             val cx = width / 2f
             val cy = height / 2f
             val radius = (diameter / 2f - stroke.strokeWidth).coerceAtLeast(1f)
-            val base = when (role) {
-                Role.TRIGGER -> Color.rgb(255, 170, 45)
-                Role.TARGET_A -> Color.rgb(45, 205, 255)
-                Role.TARGET_B -> Color.rgb(255, 85, 190)
-            }
+            val base = if (binding == Binding.R.name) Color.rgb(238, 84, 108) else Color.rgb(72, 145, 245)
             stroke.color = when {
                 editing -> Color.rgb(70, 235, 125)
                 enabled -> base
                 else -> Color.rgb(125, 125, 132)
             }
-            fill.color = Color.argb(if (role == Role.TRIGGER) 52 else 25, Color.red(stroke.color), Color.green(stroke.color), Color.blue(stroke.color))
+            fill.color = Color.argb(58, Color.red(stroke.color), Color.green(stroke.color), Color.blue(stroke.color))
+            textPaint.color = stroke.color
             canvas.drawCircle(cx, cy, radius, fill)
             canvas.drawCircle(cx, cy, radius, stroke)
-            if (role != Role.TRIGGER) {
-                val arm = radius * 0.62f
-                canvas.drawLine(cx - arm, cy, cx + arm, cy, stroke)
-                canvas.drawLine(cx, cy - arm, cx, cy + arm, stroke)
-            }
+            val baseline = cy - (textPaint.ascent() + textPaint.descent()) / 2f
+            canvas.drawText(binding, cx, baseline, textPaint)
         }
 
         private fun dp(value: Int): Int =
@@ -311,16 +278,13 @@ internal class ManualNubiaPairController(
     }
 
     companion object {
-        private const val TRIGGER_DIAMETER_MM = 10f
-        private const val TARGET_DIAMETER_MM = 3f
+        private const val TRIGGER_DIAMETER_MM = 13f
 
+        // Reuse the old trigger position/visibility keys so upgrading keeps the user's placement.
         private const val KEY_ENABLED = "manual_pair_enabled"
         private const val KEY_VISIBLE = "manual_pair_visible"
         private const val KEY_TRIGGER_X = "manual_pair_trigger_x"
         private const val KEY_TRIGGER_Y = "manual_pair_trigger_y"
-        private const val KEY_TARGET_A_X = "manual_pair_target_a_x"
-        private const val KEY_TARGET_A_Y = "manual_pair_target_a_y"
-        private const val KEY_TARGET_B_X = "manual_pair_target_b_x"
-        private const val KEY_TARGET_B_Y = "manual_pair_target_b_y"
+        private const val KEY_BINDING = "manual_shoulder_binding"
     }
 }

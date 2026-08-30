@@ -5,16 +5,15 @@ import android.os.Parcel
 import android.os.Process
 import android.os.SystemClock
 import java.lang.reflect.Method
+import java.util.concurrent.Executors
 import kotlin.math.roundToInt
 
 /**
  * REDMAGIC/Nubia virtual-touch backend running inside the Shizuku UserService
  * (ADB shell UID 2000).
  *
- * The active FIRE path is intentionally one-way from the app process so screen
- * capture never waits for vendor input completion. Inside this process we prefer
- * a direct Binder transaction to Nubia's IInputManager extension and keep the
- * cached Java reflection path only as a startup-selected compatibility fallback.
+ * FIRE remains one-way from the app process. Requests are accepted immediately,
+ * then serialized on one urgent worker so DOWN/UP pairs can never overlap.
  */
 class ShizukuInputUserService : IShizukuInputService.Stub {
     constructor()
@@ -28,6 +27,13 @@ class ShizukuInputUserService : IShizukuInputService.Stub {
     @Volatile private var lastUpCallStartNs = 0L
     @Volatile private var lastUpCallEndNs = 0L
     @Volatile private var detail = "not probed"
+
+    private val tapExecutor = Executors.newSingleThreadExecutor { task ->
+        Thread(task, "PixelTriggerNubiaTap").apply {
+            isDaemon = true
+            priority = Thread.MAX_PRIORITY
+        }
+    }
 
     private val nubiaInjector: NubiaVirtualTouchInjector? by lazy {
         NubiaVirtualTouchInjector.create().also {
@@ -57,21 +63,23 @@ class ShizukuInputUserService : IShizukuInputService.Stub {
     override fun getCapabilityDetail(): String = detail
 
     /**
-     * One-way AIDL entrypoint. Binder queues this call and releases the capture
-     * thread immediately; the exact Nubia virtualTouchEvent path stays here.
+     * One-way AIDL entrypoint. Binder returns immediately; the tap is queued FIFO
+     * and executed by the single Nubia worker.
      */
     override fun injectTapFast(triggerId: Long, x: Float, y: Float, displayId: Int) {
         if (triggerId <= 0L || !x.isFinite() || !y.isFinite()) {
             detail = "tap ignored: invalid argument"
             return
         }
-        val injector = beginRequest() ?: return
         @Suppress("UNUSED_VARIABLE")
-        val ignoredDisplayId = displayId // Nubia owns internal-display coordinate translation.
-        sendNubiaTap(injector, x, y)
+        val ignoredDisplayId = displayId
+        val receivedNs = SystemClock.elapsedRealtimeNanos()
+        submitTap(receivedNs) { injector ->
+            sendNubiaTap(injector, x, y)
+        }
     }
 
-    /** One Binder submit performs both Nubia taps in a strictly ordered sequence. */
+    /** One Binder submit queues both Nubia taps as one indivisible FIFO job. */
     override fun injectTapPairFast(
         triggerId: Long,
         firstX: Float,
@@ -88,21 +96,36 @@ class ShizukuInputUserService : IShizukuInputService.Stub {
             detail = "tap pair ignored: invalid argument"
             return
         }
-        val injector = beginRequest() ?: return
         @Suppress("UNUSED_VARIABLE")
         val ignoredDisplayId = displayId
-
-        sendNubiaTap(injector, firstX, firstY)
-        val secondDeadlineNs = SystemClock.elapsedRealtimeNanos() + PAIR_GAP_NS
-        while (SystemClock.elapsedRealtimeNanos() < secondDeadlineNs) {
-            // Deliberate 2 ms release gap between the two Nubia contacts.
+        val receivedNs = SystemClock.elapsedRealtimeNanos()
+        submitTap(receivedNs) { injector ->
+            sendNubiaTap(injector, firstX, firstY)
+            val secondDeadlineNs = SystemClock.elapsedRealtimeNanos() + PAIR_GAP_NS
+            while (SystemClock.elapsedRealtimeNanos() < secondDeadlineNs) {
+                // Deliberate release gap between the two Nubia contacts.
+            }
+            sendNubiaTap(injector, secondX, secondY)
         }
-        sendNubiaTap(injector, secondX, secondY)
     }
 
-    private fun beginRequest(): NubiaVirtualTouchInjector? {
-        lastRequestReceivedNs = SystemClock.elapsedRealtimeNanos()
-        runCatching { Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_DISPLAY) }
+    private fun submitTap(
+        receivedNs: Long,
+        action: (NubiaVirtualTouchInjector) -> Unit,
+    ) {
+        try {
+            tapExecutor.execute {
+                runCatching { Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_DISPLAY) }
+                val injector = beginRequest(receivedNs) ?: return@execute
+                action(injector)
+            }
+        } catch (failure: Throwable) {
+            detail = "tap queue rejected: ${failure.javaClass.simpleName}: ${failure.message ?: "unknown"}"
+        }
+    }
+
+    private fun beginRequest(receivedNs: Long): NubiaVirtualTouchInjector? {
+        lastRequestReceivedNs = receivedNs
         if (Process.myUid() != SHELL_UID) {
             detail = "tap ignored: UserService uid=${Process.myUid()}"
             return null
@@ -113,7 +136,18 @@ class ShizukuInputUserService : IShizukuInputService.Stub {
         }
     }
 
+    private fun waitForInterTapReleaseGap() {
+        val previousUpNs = lastUpNs
+        if (previousUpNs <= 0L) return
+        val deadlineNs = previousUpNs + INTER_TAP_RELEASE_GAP_NS
+        while (SystemClock.elapsedRealtimeNanos() < deadlineNs) {
+            // Short intentional spin on the dedicated worker only.
+        }
+    }
+
     private fun sendNubiaTap(injector: NubiaVirtualTouchInjector, x: Float, y: Float) {
+        waitForInterTapReleaseGap()
+
         val px = x.roundToInt()
         val py = y.roundToInt()
         var downSent = false
@@ -125,8 +159,6 @@ class ShizukuInputUserService : IShizukuInputService.Stub {
             lastDownNs = lastDownCallEndNs
             downSent = true
 
-            // The requested 1 ms contact begins after Nubia accepts DOWN. This
-            // work stays in the UserService and never blocks frame acquisition.
             val upDeadlineNs = lastDownCallEndNs + TAP_DURATION_NS
             while (SystemClock.elapsedRealtimeNanos() < upDeadlineNs) {
                 // Intentional short spin: avoids Handler/sleep scheduling jitter.
@@ -166,6 +198,7 @@ class ShizukuInputUserService : IShizukuInputService.Stub {
     }
 
     override fun destroy() {
+        tapExecutor.shutdownNow()
         System.exit(0)
     }
 
@@ -180,11 +213,6 @@ class ShizukuInputUserService : IShizukuInputService.Stub {
         }
     }
 
-    /**
-     * Fast path: call Nubia's verified IInputManager vendor transaction directly.
-     * Reflection is used only once to obtain ServiceManager's input binder; no
-     * reflection occurs per DOWN/UP event.
-     */
     private class DirectBinderInjector(private val binder: IBinder) : NubiaVirtualTouchInjector {
         override val kind: String = "direct-binder-126"
         override val detail: String =
@@ -224,7 +252,6 @@ class ShizukuInputUserService : IShizukuInputService.Stub {
         }
     }
 
-    /** Startup-selected fallback for ROM variants where direct Binder lookup is blocked. */
     private class ReflectionInjector(
         private val inputManager: Any,
         private val eventMethod: Method,
@@ -268,6 +295,7 @@ class ShizukuInputUserService : IShizukuInputService.Stub {
     companion object {
         const val SHELL_UID = 2000
         const val TAP_DURATION_NS = 1_000_000L
+        const val INTER_TAP_RELEASE_GAP_NS = 2_000_000L
         const val PAIR_GAP_NS = 2_000_000L
 
         const val VIRTUAL_KEYCODE = -4

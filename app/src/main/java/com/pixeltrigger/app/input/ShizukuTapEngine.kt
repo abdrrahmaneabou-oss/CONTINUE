@@ -40,9 +40,9 @@ class ShizukuTapEngine(private val context: Context) : TapEngine {
     )
         .processNameSuffix("pixeltrigger_input")
         .daemon(true)
-        .tag("pixeltrigger-input-v9-single-shot")
-        // Force Shizuku to discard the daemon from the broken synchronous build.
-        .version(12)
+        .tag("pixeltrigger-input-v10-serialized")
+        // Force Shizuku to discard the previous daemon so the FIFO tap worker is guaranteed active.
+        .version(13)
 
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {

@@ -1,0 +1,49 @@
+name: Validate orientation position fix
+
+on:
+  push:
+    branches: [ orientation-position-fix ]
+    paths:
+      - .github/workflows/validate-orientation-position-fix.yml
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK, NDK and CMake
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;27.2.12479018" "cmake;3.22.1"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Test and build
+        run: gradle --no-daemon --rerun-tasks clean :app:testDebugUnitTest :app:assembleDebug --stacktrace
+
+      - name: Remove temporary validator
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f .github/workflows/validate-orientation-position-fix.yml
+          git config user.name 'CHATGPT'
+          git config user.email 'abdrrahmaneabou@gmail.com'
+          git add -A
+          git commit -m 'chore: remove orientation validator'
+          git push origin HEAD:orientation-position-fix

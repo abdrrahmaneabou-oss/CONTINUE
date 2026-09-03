@@ -357,6 +357,10 @@ class ScreenCaptureService : Service() {
         }
 
         createGroupFiveExtraSensors()
+        // A migrated/saved profile can contain two probes at the same pixel.
+        // Repair only that broken visual overlap so group 5 always exposes
+        // three distinct monitoring circles to the user.
+        repairGroupFiveVisualOverlap(persist = groupFiveCurrentProfileExists())
 
         targetVisibleDiameter = max(mmToPx(5f), dp(12))
         targetTouchSize = max(dp(52), dp(24) + targetVisibleDiameter)
@@ -1340,6 +1344,11 @@ class ScreenCaptureService : Service() {
             extra++
         }
 
+        // Rotation itself must never overwrite an orientation profile. We only
+        // de-overlap the in-memory geometry here; a user save remains the only
+        // normal persistence path during orientation changes.
+        repairGroupFiveVisualOverlap(persist = false)
+
         val targetLp = targetParams
         val target = targetView
         if (targetLp != null && target != null) {
@@ -1377,6 +1386,93 @@ class ScreenCaptureService : Service() {
     }
 
     private fun groupFiveDefaultY(): Int = screenHeight / 2 - sensorTouchSize / 2
+
+    private fun groupFiveCurrentProfileExists(): Boolean {
+        var slot = 0
+        while (slot < GROUP_FIVE_SENSOR_COUNT) {
+            if (
+                positionStore.hasSaved(
+                    rightSensorPositionKey(GROUP_FIVE_INDEX, slot),
+                    screenWidth,
+                    screenHeight,
+                )
+            ) return true
+            slot++
+        }
+        return false
+    }
+
+    /**
+     * Group 5 is architecturally 3 probes (slot 0 + 2 extras). Old/migrated
+     * coordinates can nevertheless put two windows on the same visual center,
+     * making the user see only two circles. Preserve every valid position and
+     * relocate only a colliding later slot.
+     */
+    private fun repairGroupFiveVisualOverlap(persist: Boolean) {
+        val minDistance = max(sensorVisibleDiameter * 2, dp(4)).coerceAtLeast(1)
+        val minDistanceSq = minDistance.toLong() * minDistance.toLong()
+        val spacing = groupFiveDefaultSpacing()
+        val centerX = screenWidth / 2 - sensorTouchSize / 2
+        val centerY = screenHeight / 2 - sensorTouchSize / 2
+
+        fun overlapsOther(slot: Int, x: Int, y: Int): Boolean {
+            var other = 0
+            while (other < GROUP_FIVE_SENSOR_COUNT) {
+                if (other != slot) {
+                    val otherLp = groupFiveParams(other)
+                    if (otherLp != null) {
+                        val dx = (x - otherLp.x).toLong()
+                        val dy = (y - otherLp.y).toLong()
+                        if (dx * dx + dy * dy < minDistanceSq) return true
+                    }
+                }
+                other++
+            }
+            return false
+        }
+
+        var slot = 1
+        while (slot < GROUP_FIVE_SENSOR_COUNT) {
+            val lp = groupFiveParams(slot)
+            val view = groupFiveView(slot)
+            if (lp != null && view != null && overlapsOther(slot, lp.x, lp.y)) {
+                val candidates = arrayOf(
+                    groupFiveDefaultX(slot) to groupFiveDefaultY(),
+                    (centerX - spacing) to centerY,
+                    (centerX + spacing) to centerY,
+                    centerX to (centerY - spacing),
+                    centerX to (centerY + spacing),
+                    (centerX - spacing) to (centerY - spacing),
+                    (centerX + spacing) to (centerY + spacing),
+                )
+
+                val oldX = lp.x
+                val oldY = lp.y
+                var repaired = false
+                for ((candidateX, candidateY) in candidates) {
+                    lp.x = candidateX
+                    lp.y = candidateY
+                    clampCirclePosition(lp, sensorVisibleDiameter)
+                    if (!overlapsOther(slot, lp.x, lp.y)) {
+                        repaired = true
+                        break
+                    }
+                }
+
+                if (!repaired) {
+                    lp.x = oldX
+                    lp.y = oldY
+                } else {
+                    runCatching { windowManager.updateViewLayout(view, lp) }
+                    groupFiveDetector(slot).resetForSensorMove()
+                    if (persist) {
+                        saveRightSensorPosition(GROUP_FIVE_INDEX, slot, lp.x, lp.y)
+                    }
+                }
+            }
+            slot++
+        }
+    }
 
     private fun groupFiveDetector(slot: Int): DetectionEngine =
         if (slot == 0) detectionEngines[GROUP_FIVE_INDEX] else groupFiveExtraEngines[slot - 1]

@@ -70,6 +70,13 @@ class ScreenCaptureService : Service() {
     private val sensorViews = arrayOfNulls<SensorOverlayView>(GROUP_COUNT)
     private val sensorParams = arrayOfNulls<WindowManager.LayoutParams>(GROUP_COUNT)
     private val detectionEngines = Array(GROUP_COUNT) { DetectionEngine() }
+
+    // Groups 1-4 keep exactly one monitor. Group 5 owns these two extras in
+    // addition to sensorViews[4] / sensorParams[4] / detectionEngines[4].
+    private val groupFiveExtraViews = arrayOfNulls<SensorOverlayView>(GROUP_FIVE_EXTRA_COUNT)
+    private val groupFiveExtraParams = arrayOfNulls<WindowManager.LayoutParams>(GROUP_FIVE_EXTRA_COUNT)
+    private val groupFiveExtraEngines = Array(GROUP_FIVE_EXTRA_COUNT) { DetectionEngine() }
+
     private var sensorVisibleDiameter = 1
     private var sensorTouchSize = 1
     @Volatile private var activeGroup = 0
@@ -92,6 +99,15 @@ class ScreenCaptureService : Service() {
     @Volatile private var circleEditMode = false
     private var lastInputReady = false
 
+    private data class GlobalEngineSnapshot(
+        val rightEnabled: Boolean,
+        val leftEnabled: Boolean,
+        val manualEnabled: Boolean,
+    )
+
+    /** Non-null only while the 0.5 s global suspension is active. */
+    private var globalSuspendSnapshot: GlobalEngineSnapshot? = null
+
     private lateinit var tapEngine: ShizukuTapEngine
 
     private val displayListener = object : DisplayManager.DisplayListener {
@@ -113,11 +129,9 @@ class ScreenCaptureService : Service() {
         engineEnabled = preferences.getBoolean(KEY_RIGHT_ENGINE_ENABLED, true)
         shoulderHalfEnabled = shoulderPreferences.getBoolean(ShoulderCaptureService.KEY_ENGINE_ENABLED, true)
         activeGroup = preferences.getInt(KEY_ACTIVE_GROUP, 0).coerceIn(0, GROUP_COUNT - 1)
-        detectionEngines.forEach {
-            it.whiteRearmEnabled = true
-            it.rearmDelayEnabled = false
-            it.rearmSeconds = 10
-        }
+
+        detectionEngines.forEach(::configureRightDetector)
+        groupFiveExtraEngines.forEach(::configureRightDetector)
         preferences.edit()
             .putBoolean(KEY_WHITE_REARM, true)
             .putBoolean(KEY_REARM_DELAY_ENABLED, false)
@@ -131,6 +145,12 @@ class ScreenCaptureService : Service() {
         wakeLock = (getSystemService(POWER_SERVICE) as PowerManager)
             .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "$packageName:PixelMonitor")
             .apply { acquire() }
+    }
+
+    private fun configureRightDetector(engine: DetectionEngine) {
+        engine.whiteRearmEnabled = true
+        engine.rearmDelayEnabled = false
+        engine.rearmSeconds = 10
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -199,9 +219,8 @@ class ScreenCaptureService : Service() {
         }
 
     private fun processImage(image: Image) {
-        // The right-half FIRE pipeline always gets the newest frame first. The
-        // independent shoulder half must never delay the right detector or its
-        // one-way Nubia submission on a 144 Hz capture stream.
+        // Right half remains first so the independent shoulder half can never
+        // delay PixelProbe detection or its confirmed Nubia tap.
         processRightFrame(image)
         ShoulderCaptureService.dispatchSharedFrame(image, screenWidth, screenHeight)
     }
@@ -219,9 +238,14 @@ class ScreenCaptureService : Service() {
         if (crop.width() <= 0 || crop.height() <= 0) return
 
         val index = activeGroup
+        val now = SystemClock.elapsedRealtime()
+        if (index == GROUP_FIVE_INDEX) {
+            processGroupFiveFrame(image, crop, inputReady, now)
+            return
+        }
+
         val params = sensorParams[index] ?: return
         val sample = sampleSensor(image, crop, params) ?: return
-        val now = SystemClock.elapsedRealtime()
         when (detectionEngines[index].processSample(sample, now)) {
             is DetectionEngine.Event.Armed,
             is DetectionEngine.Event.Rearmed,
@@ -232,6 +256,50 @@ class ScreenCaptureService : Service() {
             }
             else -> Unit
         }
+    }
+
+    /**
+     * Group 5 has three independent 0.3 mm probes. The first detector that fires
+     * wins the frame and emits exactly one tap. Its siblings are synchronized to
+     * the same WAITING_REARM epoch, preventing duplicate taps from one event.
+     */
+    private fun processGroupFiveFrame(
+        image: Image,
+        crop: Rect,
+        inputReady: Boolean,
+        nowMs: Long,
+    ) {
+        var stateChanged = false
+        var slot = 0
+        while (slot < GROUP_FIVE_SENSOR_COUNT) {
+            val params = groupFiveParams(slot)
+            if (params != null) {
+                val sample = sampleSensor(image, crop, params)
+                if (sample != null) {
+                    when (groupFiveDetector(slot).processSample(sample, nowMs)) {
+                        is DetectionEngine.Event.Armed,
+                        is DetectionEngine.Event.Rearmed,
+                        is DetectionEngine.Event.ManualRearmed -> stateChanged = true
+
+                        is DetectionEngine.Event.Fired -> {
+                            var sibling = 0
+                            while (sibling < GROUP_FIVE_SENSOR_COUNT) {
+                                if (sibling != slot) {
+                                    groupFiveDetector(sibling).synchronizeAfterExternalFire(nowMs)
+                                }
+                                sibling++
+                            }
+                            executeTapImmediately()
+                            refreshSensorStatus(inputReady, SensorStatus.FIRED)
+                            return
+                        }
+                        else -> Unit
+                    }
+                }
+            }
+            slot++
+        }
+        if (stateChanged) refreshSensorStatus(inputReady)
     }
 
     private fun sampleSensor(image: Image, crop: Rect, params: WindowManager.LayoutParams): DetectionEngine.ColorSample? {
@@ -265,9 +333,12 @@ class ScreenCaptureService : Service() {
         var group = 0
         while (group < GROUP_COUNT) {
             val sensor = SensorOverlayView(this, sensorVisibleDiameter)
+            val defaultX = if (group == GROUP_FIVE_INDEX) groupFiveDefaultX(0)
+            else screenWidth / 2 - sensorTouchSize / 2
+            val defaultY = screenHeight / 2 - sensorTouchSize / 2
             val lp = overlayParams(sensorTouchSize, sensorTouchSize).apply {
-                x = preferences.getInt(sensorKeyX(group), screenWidth / 2 - sensorTouchSize / 2)
-                y = preferences.getInt(sensorKeyY(group), screenHeight / 2 - sensorTouchSize / 2)
+                x = preferences.getInt(sensorKeyX(group), defaultX)
+                y = preferences.getInt(sensorKeyY(group), defaultY)
             }
             sensorViews[group] = sensor
             sensorParams[group] = lp
@@ -280,6 +351,8 @@ class ScreenCaptureService : Service() {
             }
             group++
         }
+
+        createGroupFiveExtraSensors()
 
         val targetVisibleDiameter = max(mmToPx(5f), dp(12))
         targetTouchSize = max(dp(52), dp(24) + targetVisibleDiameter)
@@ -323,6 +396,31 @@ class ScreenCaptureService : Service() {
         updateButtonVisual()
     }
 
+    private fun createGroupFiveExtraSensors() {
+        var extra = 0
+        while (extra < GROUP_FIVE_EXTRA_COUNT) {
+            val slot = extra + 1
+            val sensor = SensorOverlayView(this, sensorVisibleDiameter)
+            val lp = overlayParams(sensorTouchSize, sensorTouchSize).apply {
+                x = preferences.getInt(sensorKeyX(GROUP_FIVE_INDEX, slot), groupFiveDefaultX(slot))
+                y = preferences.getInt(sensorKeyY(GROUP_FIVE_INDEX, slot), groupFiveDefaultY())
+            }
+            groupFiveExtraViews[extra] = sensor
+            groupFiveExtraParams[extra] = lp
+            clampCirclePosition(lp, sensorVisibleDiameter)
+            windowManager.addView(sensor, lp)
+            val savedExtra = extra
+            attachDrag(sensor, lp, sensorVisibleDiameter) { x, y ->
+                groupFiveExtraEngines[savedExtra].resetForSensorMove()
+                preferences.edit()
+                    .putInt(sensorKeyX(GROUP_FIVE_INDEX, savedExtra + 1), x)
+                    .putInt(sensorKeyY(GROUP_FIVE_INDEX, savedExtra + 1), y)
+                    .apply()
+            }
+            extra++
+        }
+    }
+
     private fun setConfigurationTouchability(enabled: Boolean) {
         var i = 0
         while (i < GROUP_COUNT) {
@@ -335,6 +433,19 @@ class ScreenCaptureService : Service() {
             }
             i++
         }
+
+        var extra = 0
+        while (extra < GROUP_FIVE_EXTRA_COUNT) {
+            val view = groupFiveExtraViews[extra]
+            val lp = groupFiveExtraParams[extra]
+            if (view != null && lp != null) {
+                lp.flags = if (enabled && activeGroup == GROUP_FIVE_INDEX) baseOverlayFlags()
+                else baseOverlayFlags() or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                runCatching { windowManager.updateViewLayout(view, lp) }
+            }
+            extra++
+        }
+
         targetView?.let { view ->
             targetParams?.let { lp ->
                 lp.flags = if (enabled) baseOverlayFlags()
@@ -403,8 +514,8 @@ class ScreenCaptureService : Service() {
         if (circleEditMode) return
         closeMenu()
         val next = (activeGroup + 1) % GROUP_COUNT
-        detectionEngines[activeGroup].resetForSensorMove()
-        detectionEngines[next].resetForSensorMove()
+        resetGroupDetectors(activeGroup)
+        resetGroupDetectors(next)
         activeGroup = next
         preferences.edit().putInt(KEY_ACTIVE_GROUP, next).apply()
         applyGroupVisibility()
@@ -461,16 +572,17 @@ class ScreenCaptureService : Service() {
         circleEditMode = true
         setCirclesVisible(true)
         setConfigurationTouchability(true)
-        detectionEngines[activeGroup].resetForSensorMove()
+        resetGroupDetectors(activeGroup)
         updateButtonVisual()
-        showMessage("اسحب دائرة المجموعة ${activeGroup + 1} ودائرة الضغط ثم اضغط الزر للحفظ")
+        val monitorLabel = if (activeGroup == GROUP_FIVE_INDEX) "دوائر المجموعة 5 الثلاث" else "دائرة المجموعة ${activeGroup + 1}"
+        showMessage("اسحب $monitorLabel ودائرة الضغط ثم اضغط الزر للحفظ")
     }
 
     private fun finishCirclePositionEditing() {
         if (!circleEditMode) return
         circleEditMode = false
         setConfigurationTouchability(false)
-        detectionEngines[activeGroup].resetForSensorMove()
+        resetGroupDetectors(activeGroup)
         updateButtonVisual()
         showMessage("تم حفظ موضع المجموعة ${activeGroup + 1}")
     }
@@ -478,6 +590,30 @@ class ScreenCaptureService : Service() {
     private fun resetMonitorCircleToCenter() {
         closeMenu()
         setCirclesVisible(true)
+
+        if (activeGroup == GROUP_FIVE_INDEX) {
+            var slot = 0
+            while (slot < GROUP_FIVE_SENSOR_COUNT) {
+                val lp = groupFiveParams(slot)
+                val view = groupFiveView(slot)
+                if (lp != null && view != null) {
+                    lp.x = groupFiveDefaultX(slot)
+                    lp.y = groupFiveDefaultY()
+                    clampCirclePosition(lp, sensorVisibleDiameter)
+                    runCatching { windowManager.updateViewLayout(view, lp) }
+                    preferences.edit()
+                        .putInt(sensorKeyX(GROUP_FIVE_INDEX, slot), lp.x)
+                        .putInt(sensorKeyY(GROUP_FIVE_INDEX, slot), lp.y)
+                        .apply()
+                }
+                slot++
+            }
+            resetGroupDetectors(GROUP_FIVE_INDEX)
+            refreshSensorStatus(tapEngine.isReady())
+            showMessage("أعيدت دوائر المجموعة 5 الثلاث إلى المنتصف")
+            return
+        }
+
         val lp = sensorParams[activeGroup] ?: return
         val view = sensorViews[activeGroup] ?: return
         lp.x = screenWidth / 2 - sensorTouchSize / 2
@@ -485,15 +621,25 @@ class ScreenCaptureService : Service() {
         clampCirclePosition(lp, sensorVisibleDiameter)
         runCatching { windowManager.updateViewLayout(view, lp) }
         preferences.edit().putInt(sensorKeyX(activeGroup), lp.x).putInt(sensorKeyY(activeGroup), lp.y).apply()
-        detectionEngines[activeGroup].resetForSensorMove()
+        resetGroupDetectors(activeGroup)
         refreshSensorStatus(tapEngine.isReady())
         showMessage("أعيدت دائرة المجموعة ${activeGroup + 1} إلى المنتصف")
+    }
+
+    private fun resetGroupDetectors(group: Int) {
+        detectionEngines[group].resetForSensorMove()
+        if (group == GROUP_FIVE_INDEX) groupFiveExtraEngines.forEach { it.resetForSensorMove() }
+    }
+
+    private fun resetAllRightDetectors() {
+        detectionEngines.forEach { it.resetForSensorMove() }
+        groupFiveExtraEngines.forEach { it.resetForSensorMove() }
     }
 
     private fun setRightEngineEnabled(enabled: Boolean) {
         engineEnabled = enabled
         preferences.edit().putBoolean(KEY_RIGHT_ENGINE_ENABLED, enabled).apply()
-        detectionEngines.forEach { it.resetForSensorMove() }
+        resetAllRightDetectors()
         refreshSensorStatus(tapEngine.isReady(), if (enabled) null else SensorStatus.OFF)
         updateButtonVisual()
     }
@@ -515,20 +661,49 @@ class ScreenCaptureService : Service() {
 
     private fun toggleLeftEngine() = setLeftEngineEnabled(!shoulderHalfEnabled)
 
+    /**
+     * 0.5 s hold is a true suspend/resume operation. The first hold snapshots
+     * each independent module exactly as it is and turns everything off. The
+     * second hold restores that snapshot instead of blindly enabling all halves.
+     */
     private fun toggleAllEngines() {
-        val manualEnabled = ::manualTapPair.isInitialized && manualTapPair.isEnabled
-        val anythingEnabled = engineEnabled || shoulderHalfEnabled || manualEnabled
-        val targetEnabled = !anythingEnabled
-        setRightEngineEnabled(targetEnabled)
-        setLeftEngineEnabled(targetEnabled)
-        if (::manualTapPair.isInitialized) manualTapPair.setEnabled(targetEnabled)
+        val saved = globalSuspendSnapshot
+        if (saved == null) {
+            globalSuspendSnapshot = GlobalEngineSnapshot(
+                rightEnabled = engineEnabled,
+                leftEnabled = shoulderHalfEnabled,
+                manualEnabled = ::manualTapPair.isInitialized && manualTapPair.isEnabled,
+            )
+            setRightEngineEnabled(false)
+            setLeftEngineEnabled(false)
+            if (::manualTapPair.isInitialized) manualTapPair.setEnabled(false)
+            updateButtonVisual()
+            showMessage("PixelTrigger V5 OFF • الحالة محفوظة")
+            return
+        }
+
+        globalSuspendSnapshot = null
+        setRightEngineEnabled(saved.rightEnabled)
+        setLeftEngineEnabled(saved.leftEnabled)
+        if (::manualTapPair.isInitialized) manualTapPair.setEnabled(saved.manualEnabled)
         updateButtonVisual()
-        showMessage(if (targetEnabled) "PixelTrigger V5 ON" else "PixelTrigger V5 OFF")
+        showMessage("تمت استعادة حالة PixelTrigger السابقة")
+    }
+
+    private fun activeGroupHasArmedDetector(): Boolean {
+        if (activeGroup != GROUP_FIVE_INDEX) {
+            return detectionEngines[activeGroup].state == DetectionEngine.State.ARMED
+        }
+        var slot = 0
+        while (slot < GROUP_FIVE_SENSOR_COUNT) {
+            if (groupFiveDetector(slot).state == DetectionEngine.State.ARMED) return true
+            slot++
+        }
+        return false
     }
 
     private fun updateButtonVisual() {
         val button = menuButton ?: return
-        val state = detectionEngines[activeGroup].state
         val manualOff = !::manualTapPair.isInitialized || !manualTapPair.isEnabled
         val everythingOff = !engineEnabled && !shoulderHalfEnabled && manualOff
         val fill = when {
@@ -536,7 +711,7 @@ class ScreenCaptureService : Service() {
             everythingOff -> Color.rgb(95, 95, 104)
             !engineEnabled -> Color.rgb(122, 92, 55)
             tapEngine.capability != InputCapability.CONCURRENT_TOUCH_SAFE -> Color.rgb(165, 70, 190)
-            state == DetectionEngine.State.ARMED -> Color.rgb(32, 170, 88)
+            activeGroupHasArmedDetector() -> Color.rgb(32, 170, 88)
             else -> Color.rgb(79, 52, 185)
         }
         button.text = when {
@@ -585,14 +760,21 @@ class ScreenCaptureService : Service() {
         }
         content.addView(menuStatusText, matchWrap())
 
-        content.addView(sectionLabel("PIXELPROBE  •  GROUP ${activeGroup + 1}/4", Color.rgb(83, 58, 170)), matchWrap())
+        content.addView(sectionLabel("PIXELPROBE  •  GROUP ${activeGroup + 1}/$GROUP_COUNT", Color.rgb(83, 58, 170)), matchWrap())
         val rightRow1 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         rightRow1.addView(smallCard("↺ المنتصف") { resetMonitorCircleToCenter() }, LinearLayout.LayoutParams(0, dp(58), 1f))
         rightRow1.addView(smallCard("✥ تعديل الموضع") { beginCirclePositionEditing() }, LinearLayout.LayoutParams(0, dp(58), 1f))
         content.addView(rightRow1, matchWrap(dp(60)))
 
+        val monitorPlural = activeGroup == GROUP_FIVE_INDEX
         content.addView(
-            smallCard(if (circlesVisible) "◉ إخفاء الدائرة" else "○ إظهار الدائرة") {
+            smallCard(
+                if (circlesVisible) {
+                    if (monitorPlural) "◉ إخفاء الدوائر" else "◉ إخفاء الدائرة"
+                } else {
+                    if (monitorPlural) "○ إظهار الدوائر" else "○ إظهار الدائرة"
+                },
+            ) {
                 setCirclesVisible(!circlesVisible)
                 closeMenu()
             },
@@ -820,26 +1002,59 @@ class ScreenCaptureService : Service() {
         return "PixelProbe: ${engineStatusText()}  •  R/L: ${ShoulderCaptureService.statusSummary()}  •  $manual"
     }
 
-    private fun engineStatusText(): String = when {
-        !engineEnabled -> "OFF"
-        tapEngine.capability != InputCapability.CONCURRENT_TOUCH_SAFE -> "WAITING_SHIZUKU"
-        detectionEngines[activeGroup].state == DetectionEngine.State.ARMED -> "ARMED"
-        detectionEngines[activeGroup].state == DetectionEngine.State.WAITING_REARM -> "WAITING_REARM"
-        else -> "WAITING_FOR_WHITE"
+    private fun engineStatusText(): String {
+        if (!engineEnabled) return "OFF"
+        if (tapEngine.capability != InputCapability.CONCURRENT_TOUCH_SAFE) return "WAITING_SHIZUKU"
+
+        if (activeGroup == GROUP_FIVE_INDEX) {
+            var armed = 0
+            var waitingRearm = 0
+            var slot = 0
+            while (slot < GROUP_FIVE_SENSOR_COUNT) {
+                when (groupFiveDetector(slot).state) {
+                    DetectionEngine.State.ARMED -> armed++
+                    DetectionEngine.State.WAITING_REARM -> waitingRearm++
+                    else -> Unit
+                }
+                slot++
+            }
+            return when {
+                armed > 0 -> "ARMED $armed/$GROUP_FIVE_SENSOR_COUNT"
+                waitingRearm > 0 -> "WAITING_REARM"
+                else -> "WAITING_FOR_WHITE"
+            }
+        }
+
+        return when (detectionEngines[activeGroup].state) {
+            DetectionEngine.State.ARMED -> "ARMED"
+            DetectionEngine.State.WAITING_REARM -> "WAITING_REARM"
+            else -> "WAITING_FOR_WHITE"
+        }
     }
+
+    private fun detectorStatus(engine: DetectionEngine, inputReady: Boolean, forced: SensorStatus?): SensorStatus =
+        forced ?: when {
+            !engineEnabled -> SensorStatus.OFF
+            !inputReady -> SensorStatus.INPUT_NOT_READY
+            engine.state == DetectionEngine.State.ARMED -> SensorStatus.ARMED
+            engine.state == DetectionEngine.State.WAITING_REARM -> SensorStatus.FIRED
+            else -> SensorStatus.WAITING
+        }
 
     private fun refreshSensorStatus(inputReady: Boolean, forced: SensorStatus? = null) {
         mainHandler.post {
-            val view = sensorViews[activeGroup]
-            val engine = detectionEngines[activeGroup]
-            val status = forced ?: when {
-                !engineEnabled -> SensorStatus.OFF
-                !inputReady -> SensorStatus.INPUT_NOT_READY
-                engine.state == DetectionEngine.State.ARMED -> SensorStatus.ARMED
-                engine.state == DetectionEngine.State.WAITING_REARM -> SensorStatus.FIRED
-                else -> SensorStatus.WAITING
+            val group = activeGroup
+            if (group == GROUP_FIVE_INDEX) {
+                var slot = 0
+                while (slot < GROUP_FIVE_SENSOR_COUNT) {
+                    groupFiveView(slot)?.setStatus(detectorStatus(groupFiveDetector(slot), inputReady, forced))
+                    slot++
+                }
+            } else {
+                val view = sensorViews[group]
+                val engine = detectionEngines[group]
+                view?.setStatus(detectorStatus(engine, inputReady, forced))
             }
-            view?.setStatus(status)
             updateButtonVisual()
             menuStatusText?.text = combinedStatusText()
         }
@@ -902,6 +1117,8 @@ class ScreenCaptureService : Service() {
             sensorViews[i]?.visibility = if (circlesVisible && i == activeGroup) View.VISIBLE else View.INVISIBLE
             i++
         }
+        val groupFiveVisible = circlesVisible && activeGroup == GROUP_FIVE_INDEX
+        groupFiveExtraViews.forEach { it?.visibility = if (groupFiveVisible) View.VISIBLE else View.INVISIBLE }
         targetView?.visibility = if (circlesVisible) View.VISIBLE else View.INVISIBLE
     }
 
@@ -922,11 +1139,18 @@ class ScreenCaptureService : Service() {
             virtualDisplay?.resize(captureWidth, captureHeight, captureDensityDpi)
             virtualDisplay?.surface = replacement.surface
             old?.close()
-            detectionEngines.forEach { it.resetForSensorMove() }
+            resetAllRightDetectors()
         }
 
         sensorParams.forEachIndexed { i, lp ->
             val view = sensorViews[i]
+            if (lp != null && view != null) {
+                clampCirclePosition(lp, sensorVisibleDiameter)
+                runCatching { windowManager.updateViewLayout(view, lp) }
+            }
+        }
+        groupFiveExtraParams.forEachIndexed { i, lp ->
+            val view = groupFiveExtraViews[i]
             if (lp != null && view != null) {
                 clampCirclePosition(lp, sensorVisibleDiameter)
                 runCatching { windowManager.updateViewLayout(view, lp) }
@@ -1017,8 +1241,38 @@ class ScreenCaptureService : Service() {
         return (mm * ((x + y) / 2f) / 25.4f).roundToInt()
     }
 
-    private fun sensorKeyX(group: Int): String = if (group == 0) KEY_SENSOR_X else "sensor_g${group + 1}_1_x"
-    private fun sensorKeyY(group: Int): String = if (group == 0) KEY_SENSOR_Y else "sensor_g${group + 1}_1_y"
+    private fun sensorKeyX(group: Int, slot: Int = 0): String = when {
+        group == 0 && slot == 0 -> KEY_SENSOR_X
+        else -> "sensor_g${group + 1}_${slot + 1}_x"
+    }
+
+    private fun sensorKeyY(group: Int, slot: Int = 0): String = when {
+        group == 0 && slot == 0 -> KEY_SENSOR_Y
+        else -> "sensor_g${group + 1}_${slot + 1}_y"
+    }
+
+    private fun groupFiveDefaultSpacing(): Int = max(dp(64), sensorTouchSize + dp(12))
+
+    private fun groupFiveDefaultX(slot: Int): Int {
+        val center = screenWidth / 2 - sensorTouchSize / 2
+        val spacing = groupFiveDefaultSpacing()
+        return when (slot) {
+            1 -> center - spacing
+            2 -> center + spacing
+            else -> center
+        }
+    }
+
+    private fun groupFiveDefaultY(): Int = screenHeight / 2 - sensorTouchSize / 2
+
+    private fun groupFiveDetector(slot: Int): DetectionEngine =
+        if (slot == 0) detectionEngines[GROUP_FIVE_INDEX] else groupFiveExtraEngines[slot - 1]
+
+    private fun groupFiveView(slot: Int): SensorOverlayView? =
+        if (slot == 0) sensorViews[GROUP_FIVE_INDEX] else groupFiveExtraViews[slot - 1]
+
+    private fun groupFiveParams(slot: Int): WindowManager.LayoutParams? =
+        if (slot == 0) sensorParams[GROUP_FIVE_INDEX] else groupFiveExtraParams[slot - 1]
 
     private fun showMessage(message: String) {
         mainHandler.post { Toast.makeText(this, message, Toast.LENGTH_SHORT).show() }
@@ -1035,7 +1289,7 @@ class ScreenCaptureService : Service() {
     private fun buildNotification(): Notification = NotificationCompat.Builder(this, CHANNEL_ID)
         .setSmallIcon(android.R.drawable.ic_menu_view)
         .setContentTitle("PixelTrigger V5")
-        .setContentText("4×1 PixelProbe + 1R + 1L")
+        .setContentText("4×1 + 1×3 PixelProbe + 1R + 1L")
         .setOngoing(true)
         .build()
 
@@ -1057,6 +1311,7 @@ class ScreenCaptureService : Service() {
         (getSystemService(DISPLAY_SERVICE) as DisplayManager).unregisterDisplayListener(displayListener)
         closeMenu()
         sensorViews.forEach { it?.let { view -> runCatching { windowManager.removeView(view) } } }
+        groupFiveExtraViews.forEach { it?.let { view -> runCatching { windowManager.removeView(view) } } }
         targetView?.let { runCatching { windowManager.removeView(it) } }
         if (::manualTapPair.isInitialized) manualTapPair.destroy()
         menuButton?.let { runCatching { windowManager.removeView(it) } }
@@ -1081,7 +1336,10 @@ class ScreenCaptureService : Service() {
         private const val CHANNEL_ID = "pixeltrigger_monitor"
         private const val NOTIFICATION_ID = 41
         private const val PREFS_NAME = "pixeltrigger_prefs"
-        private const val GROUP_COUNT = 4
+        private const val GROUP_COUNT = 5
+        private const val GROUP_FIVE_INDEX = 4
+        private const val GROUP_FIVE_SENSOR_COUNT = 3
+        private const val GROUP_FIVE_EXTRA_COUNT = GROUP_FIVE_SENSOR_COUNT - 1
         private const val MONITOR_DIAMETER_MM = 0.3f
         private const val CAPTURE_SCALE = 0.5f
         private const val DISPLAY_REFRESH_DEBOUNCE_MS = 16L

@@ -1,0 +1,114 @@
+name: Group5 independent burst
+
+on:
+  push:
+    branches: [ group5-independent-burst ]
+
+permissions:
+  contents: write
+
+jobs:
+  patch-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK, NDK and CMake
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;27.2.12479018" "cmake;3.22.1"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Patch source
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path('app/src/main/java/com/pixeltrigger/app/ScreenCaptureService.kt')
+          s = p.read_text()
+
+          old = '''    private var lastInputReady = false\n\n    private data class GlobalEngineSnapshot('''
+          new = '''    private var lastInputReady = false\n    @Volatile private var groupFiveTapsPerFire = 1\n\n    private data class GlobalEngineSnapshot('''
+          if old not in s:
+              raise SystemExit('group5 tap count field anchor not found')
+          s = s.replace(old, new, 1)
+
+          old = '''        activeGroup = preferences.getInt(KEY_ACTIVE_GROUP, 0).coerceIn(0, GROUP_COUNT - 1)\n\n        detectionEngines.forEach(::configureRightDetector)'''
+          new = '''        activeGroup = preferences.getInt(KEY_ACTIVE_GROUP, 0).coerceIn(0, GROUP_COUNT - 1)\n        groupFiveTapsPerFire = preferences.getInt(KEY_GROUP_FIVE_TAPS_PER_FIRE, 1)\n            .coerceIn(1, GROUP_FIVE_MAX_TAPS)\n\n        detectionEngines.forEach(::configureRightDetector)'''
+          if old not in s:
+              raise SystemExit('onCreate anchor not found')
+          s = s.replace(old, new, 1)
+
+          old = '''    /**\n     * Group 5 has three independent 0.3 mm probes. The first detector that fires\n     * wins the frame and emits exactly one tap. Its siblings are synchronized to\n     * the same WAITING_REARM epoch, preventing duplicate taps from one event.\n     */\n    private fun processGroupFiveFrame(\n        image: Image,\n        crop: Rect,\n        inputReady: Boolean,\n        nowMs: Long,\n    ) {\n        var stateChanged = false\n        var slot = 0\n        while (slot < GROUP_FIVE_SENSOR_COUNT) {\n            val params = groupFiveParams(slot)\n            if (params != null) {\n                val sample = sampleSensor(image, crop, params)\n                if (sample != null) {\n                    when (groupFiveDetector(slot).processSample(sample, nowMs)) {\n                        is DetectionEngine.Event.Armed,\n                        is DetectionEngine.Event.Rearmed,\n                        is DetectionEngine.Event.ManualRearmed -> stateChanged = true\n\n                        is DetectionEngine.Event.Fired -> {\n                            var sibling = 0\n                            while (sibling < GROUP_FIVE_SENSOR_COUNT) {\n                                if (sibling != slot) {\n                                    groupFiveDetector(sibling).synchronizeAfterExternalFire(nowMs)\n                                }\n                                sibling++\n                            }\n                            executeTapImmediately()\n                            refreshSensorStatus(inputReady, SensorStatus.FIRED)\n                            return\n                        }\n                        else -> Unit\n                    }\n                }\n            }\n            slot++\n        }\n        if (stateChanged) refreshSensorStatus(inputReady)\n    }\n'''
+          new = '''    /**\n     * Group 5 owns three fully independent 0.3 mm probes. Every probe evaluates\n     * the frame and may FIRE even when one or both siblings also FIRE from the\n     * same visual event. A FIRE starts that probe's own configurable tap burst.\n     */\n    private fun processGroupFiveFrame(\n        image: Image,\n        crop: Rect,\n        inputReady: Boolean,\n        nowMs: Long,\n    ) {\n        var stateChanged = false\n        var fired = false\n        var slot = 0\n        while (slot < GROUP_FIVE_SENSOR_COUNT) {\n            val params = groupFiveParams(slot)\n            if (params != null) {\n                val sample = sampleSensor(image, crop, params)\n                if (sample != null) {\n                    when (groupFiveDetector(slot).processSample(sample, nowMs)) {\n                        is DetectionEngine.Event.Armed,\n                        is DetectionEngine.Event.Rearmed,\n                        is DetectionEngine.Event.ManualRearmed -> stateChanged = true\n\n                        is DetectionEngine.Event.Fired -> {\n                            executeGroupFiveBurst()\n                            fired = true\n                        }\n                        else -> Unit\n                    }\n                }\n            }\n            slot++\n        }\n\n        // Do not force one shared FIRED color. Each detector renders from its own\n        // state, so a fired probe can be red while an armed sibling remains green.\n        if (stateChanged || fired) refreshSensorStatus(inputReady)\n    }\n'''
+          if old not in s:
+              raise SystemExit('group5 process block not found')
+          s = s.replace(old, new, 1)
+
+          old = '''    private fun executeTapImmediately() {\n        if (!engineEnabled) return\n        val target = targetParams ?: return\n        tapEngine.fireFast(\n            target.x + targetTouchSize / 2f,\n            target.y + targetTouchSize / 2f,\n            displayId = 0,\n        )\n    }\n\n    private fun createOverlays() {'''
+          new = '''    private fun executeTapImmediately() {\n        if (!engineEnabled) return\n        val target = targetParams ?: return\n        tapEngine.fireFast(\n            target.x + targetTouchSize / 2f,\n            target.y + targetTouchSize / 2f,\n            displayId = 0,\n        )\n    }\n\n    /**\n     * Group-5-only burst. Tap 1 is synchronous and immediate. Later taps are\n     * scheduled on the existing capture/input handler at exact 50 ms offsets,\n     * so detection is never blocked by sleeping between taps.\n     */\n    private fun executeGroupFiveBurst() {\n        if (!engineEnabled || activeGroup != GROUP_FIVE_INDEX || circleEditMode) return\n        val target = targetParams ?: return\n        val x = target.x + targetTouchSize / 2f\n        val y = target.y + targetTouchSize / 2f\n        val tapCount = groupFiveTapsPerFire.coerceIn(1, GROUP_FIVE_MAX_TAPS)\n\n        tapEngine.fireFast(x, y, displayId = 0)\n        if (tapCount <= 1) return\n\n        val handler = captureHandler ?: return\n        var tapIndex = 1\n        while (tapIndex < tapCount) {\n            val delayMs = tapIndex * GROUP_FIVE_TAP_GAP_MS\n            handler.postDelayed({\n                if (engineEnabled && activeGroup == GROUP_FIVE_INDEX && !circleEditMode) {\n                    tapEngine.fireFast(x, y, displayId = 0)\n                }\n            }, delayMs)\n            tapIndex++\n        }\n    }\n\n    private fun createOverlays() {'''
+          if old not in s:
+              raise SystemExit('execute tap anchor not found')
+          s = s.replace(old, new, 1)
+
+          old = '''        content.addView(\n            smallCard(\n                if (circlesVisible) {\n                    if (monitorPlural) "◉ إخفاء الدوائر" else "◉ إخفاء الدائرة"\n                } else {\n                    if (monitorPlural) "○ إظهار الدوائر" else "○ إظهار الدائرة"\n                },\n            ) {\n                setCirclesVisible(!circlesVisible)\n                closeMenu()\n            },\n            matchWrap(dp(58)),\n        )\n\n        content.addView(sectionLabel("تشغيل النصفين", Color.rgb(55, 105, 125)), matchWrap())'''
+          new = '''        content.addView(\n            smallCard(\n                if (circlesVisible) {\n                    if (monitorPlural) "◉ إخفاء الدوائر" else "◉ إخفاء الدائرة"\n                } else {\n                    if (monitorPlural) "○ إظهار الدوائر" else "○ إظهار الدائرة"\n                },\n            ) {\n                setCirclesVisible(!circlesVisible)\n                closeMenu()\n            },\n            matchWrap(dp(58)),\n        )\n\n        if (activeGroup == GROUP_FIVE_INDEX) {\n            content.addView(\n                sectionLabel("GROUP 5  •  ضغطات كل FIRE  •  فارق 50ms", Color.rgb(83, 58, 170)),\n                matchWrap(),\n            )\n            val burstRow = LinearLayout(this).apply {\n                orientation = LinearLayout.HORIZONTAL\n                gravity = Gravity.CENTER_VERTICAL\n            }\n            val burstValue = TextView(this).apply {\n                textSize = 13f\n                gravity = Gravity.CENTER\n                setTextColor(Color.rgb(48, 42, 70))\n                background = roundedBackground(Color.rgb(239, 236, 252), Color.rgb(129, 110, 202), 12f)\n            }\n            fun refreshBurstValue() {\n                burstValue.text = "×$groupFiveTapsPerFire لكل FIRE"\n            }\n            burstRow.addView(\n                smallCard("−") {\n                    setGroupFiveTapsPerFire(groupFiveTapsPerFire - 1)\n                    refreshBurstValue()\n                },\n                LinearLayout.LayoutParams(dp(64), dp(46)),\n            )\n            burstRow.addView(burstValue, LinearLayout.LayoutParams(0, dp(46), 1f))\n            burstRow.addView(\n                smallCard("+") {\n                    setGroupFiveTapsPerFire(groupFiveTapsPerFire + 1)\n                    refreshBurstValue()\n                },\n                LinearLayout.LayoutParams(dp(64), dp(46)),\n            )\n            refreshBurstValue()\n            content.addView(burstRow, matchWrap(dp(48)))\n        }\n\n        content.addView(sectionLabel("تشغيل النصفين", Color.rgb(55, 105, 125)), matchWrap())'''
+          if old not in s:
+              raise SystemExit('menu anchor not found')
+          s = s.replace(old, new, 1)
+
+          old = '''    private fun resetAllRightDetectors() {\n        detectionEngines.forEach { it.resetForSensorMove() }\n        groupFiveExtraEngines.forEach { it.resetForSensorMove() }\n    }\n\n    private fun setRightEngineEnabled(enabled: Boolean) {'''
+          new = '''    private fun resetAllRightDetectors() {\n        detectionEngines.forEach { it.resetForSensorMove() }\n        groupFiveExtraEngines.forEach { it.resetForSensorMove() }\n    }\n\n    private fun setGroupFiveTapsPerFire(value: Int) {\n        val clamped = value.coerceIn(1, GROUP_FIVE_MAX_TAPS)\n        groupFiveTapsPerFire = clamped\n        preferences.edit().putInt(KEY_GROUP_FIVE_TAPS_PER_FIRE, clamped).apply()\n    }\n\n    private fun setRightEngineEnabled(enabled: Boolean) {'''
+          if old not in s:
+              raise SystemExit('setter anchor not found')
+          s = s.replace(old, new, 1)
+
+          old = '''        private const val GROUP_FIVE_SENSOR_COUNT = 3\n        private const val GROUP_FIVE_EXTRA_COUNT = GROUP_FIVE_SENSOR_COUNT - 1\n        private const val MONITOR_DIAMETER_MM = 0.3f'''
+          new = '''        private const val GROUP_FIVE_SENSOR_COUNT = 3\n        private const val GROUP_FIVE_EXTRA_COUNT = GROUP_FIVE_SENSOR_COUNT - 1\n        private const val GROUP_FIVE_MAX_TAPS = 5\n        private const val GROUP_FIVE_TAP_GAP_MS = 50L\n        private const val MONITOR_DIAMETER_MM = 0.3f'''
+          if old not in s:
+              raise SystemExit('group5 constants anchor not found')
+          s = s.replace(old, new, 1)
+
+          old = '''        private const val KEY_RIGHT_ENGINE_ENABLED = "right_half_enabled"\n        private const val KEY_WHITE_REARM = "white_rearm_enabled"'''
+          new = '''        private const val KEY_RIGHT_ENGINE_ENABLED = "right_half_enabled"\n        private const val KEY_GROUP_FIVE_TAPS_PER_FIRE = "group5_taps_per_fire"\n        private const val KEY_WHITE_REARM = "white_rearm_enabled"'''
+          if old not in s:
+              raise SystemExit('preference key anchor not found')
+          s = s.replace(old, new, 1)
+
+          p.write_text(s)
+
+          b = Path('app/build.gradle.kts')
+          t = b.read_text()
+          if 'versionCode = 60' not in t or 'versionName = "5.0-group5-three-visible"' not in t:
+              raise SystemExit('version anchor not found')
+          t = t.replace('versionCode = 60', 'versionCode = 61', 1)
+          t = t.replace('versionName = "5.0-group5-three-visible"', 'versionName = "5.0-group5-independent-burst"', 1)
+          b.write_text(t)
+          PY
+          git diff --check
+
+      - name: Test and build
+        run: gradle --no-daemon --rerun-tasks clean :app:testDebugUnitTest :app:assembleDebug --stacktrace
+
+      - name: Commit clean source fix
+        shell: bash
+        run: |
+          rm -f .github/workflows/group5-independent-burst.yml
+          git config user.name 'CHATGPT'
+          git config user.email 'abdrrahmaneabou@gmail.com'
+          git add -A
+          git commit -m 'feat: make group5 probes independent with tap bursts'
+          git push origin HEAD:group5-independent-burst

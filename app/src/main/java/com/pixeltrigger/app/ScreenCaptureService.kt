@@ -100,6 +100,7 @@ class ScreenCaptureService : Service() {
     @Volatile private var shoulderHalfEnabled = true
     @Volatile private var circleEditMode = false
     private var lastInputReady = false
+    @Volatile private var groupFiveTapsPerFire = 1
 
     private data class GlobalEngineSnapshot(
         val rightEnabled: Boolean,
@@ -132,6 +133,8 @@ class ScreenCaptureService : Service() {
         engineEnabled = preferences.getBoolean(KEY_RIGHT_ENGINE_ENABLED, true)
         shoulderHalfEnabled = shoulderPreferences.getBoolean(ShoulderCaptureService.KEY_ENGINE_ENABLED, true)
         activeGroup = preferences.getInt(KEY_ACTIVE_GROUP, 0).coerceIn(0, GROUP_COUNT - 1)
+        groupFiveTapsPerFire = preferences.getInt(KEY_GROUP_FIVE_TAPS_PER_FIRE, 1)
+            .coerceIn(1, GROUP_FIVE_MAX_TAPS)
 
         detectionEngines.forEach(::configureRightDetector)
         groupFiveExtraEngines.forEach(::configureRightDetector)
@@ -262,9 +265,9 @@ class ScreenCaptureService : Service() {
     }
 
     /**
-     * Group 5 has three independent 0.3 mm probes. The first detector that fires
-     * wins the frame and emits exactly one tap. Its siblings are synchronized to
-     * the same WAITING_REARM epoch, preventing duplicate taps from one event.
+     * Group 5 owns three fully independent 0.3 mm probes. Every probe evaluates
+     * the frame and may FIRE even when one or both siblings also FIRE from the
+     * same visual event. A FIRE starts that probe's own configurable tap burst.
      */
     private fun processGroupFiveFrame(
         image: Image,
@@ -273,6 +276,7 @@ class ScreenCaptureService : Service() {
         nowMs: Long,
     ) {
         var stateChanged = false
+        var fired = false
         var slot = 0
         while (slot < GROUP_FIVE_SENSOR_COUNT) {
             val params = groupFiveParams(slot)
@@ -285,16 +289,8 @@ class ScreenCaptureService : Service() {
                         is DetectionEngine.Event.ManualRearmed -> stateChanged = true
 
                         is DetectionEngine.Event.Fired -> {
-                            var sibling = 0
-                            while (sibling < GROUP_FIVE_SENSOR_COUNT) {
-                                if (sibling != slot) {
-                                    groupFiveDetector(sibling).synchronizeAfterExternalFire(nowMs)
-                                }
-                                sibling++
-                            }
-                            executeTapImmediately()
-                            refreshSensorStatus(inputReady, SensorStatus.FIRED)
-                            return
+                            executeGroupFiveBurst()
+                            fired = true
                         }
                         else -> Unit
                     }
@@ -302,7 +298,10 @@ class ScreenCaptureService : Service() {
             }
             slot++
         }
-        if (stateChanged) refreshSensorStatus(inputReady)
+
+        // Do not force one shared FIRED color. Each detector renders from its own
+        // state, so a fired probe can be red while an armed sibling remains green.
+        if (stateChanged || fired) refreshSensorStatus(inputReady)
     }
 
     private fun sampleSensor(image: Image, crop: Rect, params: WindowManager.LayoutParams): DetectionEngine.ColorSample? {
@@ -326,6 +325,34 @@ class ScreenCaptureService : Service() {
             target.y + targetTouchSize / 2f,
             displayId = 0,
         )
+    }
+
+    /**
+     * Group-5-only burst. Tap 1 is synchronous and immediate. Later taps are
+     * scheduled on the existing capture/input handler at exact 50 ms offsets,
+     * so detection is never blocked by sleeping between taps.
+     */
+    private fun executeGroupFiveBurst() {
+        if (!engineEnabled || activeGroup != GROUP_FIVE_INDEX || circleEditMode) return
+        val target = targetParams ?: return
+        val x = target.x + targetTouchSize / 2f
+        val y = target.y + targetTouchSize / 2f
+        val tapCount = groupFiveTapsPerFire.coerceIn(1, GROUP_FIVE_MAX_TAPS)
+
+        tapEngine.fireFast(x, y, displayId = 0)
+        if (tapCount <= 1) return
+
+        val handler = captureHandler ?: return
+        var tapIndex = 1
+        while (tapIndex < tapCount) {
+            val delayMs = tapIndex * GROUP_FIVE_TAP_GAP_MS
+            handler.postDelayed({
+                if (engineEnabled && activeGroup == GROUP_FIVE_INDEX && !circleEditMode) {
+                    tapEngine.fireFast(x, y, displayId = 0)
+                }
+            }, delayMs)
+            tapIndex++
+        }
     }
 
     private fun createOverlays() {
@@ -648,6 +675,12 @@ class ScreenCaptureService : Service() {
         groupFiveExtraEngines.forEach { it.resetForSensorMove() }
     }
 
+    private fun setGroupFiveTapsPerFire(value: Int) {
+        val clamped = value.coerceIn(1, GROUP_FIVE_MAX_TAPS)
+        groupFiveTapsPerFire = clamped
+        preferences.edit().putInt(KEY_GROUP_FIVE_TAPS_PER_FIRE, clamped).apply()
+    }
+
     private fun setRightEngineEnabled(enabled: Boolean) {
         engineEnabled = enabled
         preferences.edit().putBoolean(KEY_RIGHT_ENGINE_ENABLED, enabled).apply()
@@ -792,6 +825,43 @@ class ScreenCaptureService : Service() {
             },
             matchWrap(dp(58)),
         )
+
+        if (activeGroup == GROUP_FIVE_INDEX) {
+            content.addView(
+                sectionLabel("GROUP 5  •  ضغطات كل FIRE  •  فارق 50ms", Color.rgb(83, 58, 170)),
+                matchWrap(),
+            )
+            val burstRow = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            val burstValue = TextView(this).apply {
+                textSize = 13f
+                gravity = Gravity.CENTER
+                setTextColor(Color.rgb(48, 42, 70))
+                background = roundedBackground(Color.rgb(239, 236, 252), Color.rgb(129, 110, 202), 12f)
+            }
+            fun refreshBurstValue() {
+                burstValue.text = "×$groupFiveTapsPerFire لكل FIRE"
+            }
+            burstRow.addView(
+                smallCard("−") {
+                    setGroupFiveTapsPerFire(groupFiveTapsPerFire - 1)
+                    refreshBurstValue()
+                },
+                LinearLayout.LayoutParams(dp(64), dp(46)),
+            )
+            burstRow.addView(burstValue, LinearLayout.LayoutParams(0, dp(46), 1f))
+            burstRow.addView(
+                smallCard("+") {
+                    setGroupFiveTapsPerFire(groupFiveTapsPerFire + 1)
+                    refreshBurstValue()
+                },
+                LinearLayout.LayoutParams(dp(64), dp(46)),
+            )
+            refreshBurstValue()
+            content.addView(burstRow, matchWrap(dp(48)))
+        }
 
         content.addView(sectionLabel("تشغيل النصفين", Color.rgb(55, 105, 125)), matchWrap())
         val halvesRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
@@ -1549,6 +1619,8 @@ class ScreenCaptureService : Service() {
         private const val GROUP_FIVE_INDEX = 4
         private const val GROUP_FIVE_SENSOR_COUNT = 3
         private const val GROUP_FIVE_EXTRA_COUNT = GROUP_FIVE_SENSOR_COUNT - 1
+        private const val GROUP_FIVE_MAX_TAPS = 5
+        private const val GROUP_FIVE_TAP_GAP_MS = 50L
         private const val MONITOR_DIAMETER_MM = 0.3f
         private const val CAPTURE_SCALE = 0.5f
         private const val DISPLAY_REFRESH_DEBOUNCE_MS = 16L
@@ -1565,6 +1637,7 @@ class ScreenCaptureService : Service() {
         private const val KEY_MENU_Y = "menu_y"
         private const val KEY_CIRCLES_VISIBLE = "circles_visible"
         private const val KEY_RIGHT_ENGINE_ENABLED = "right_half_enabled"
+        private const val KEY_GROUP_FIVE_TAPS_PER_FIRE = "group5_taps_per_fire"
         private const val KEY_WHITE_REARM = "white_rearm_enabled"
         private const val KEY_REARM_DELAY_ENABLED = "rearm_delay_enabled"
         private const val RIGHT_TARGET_POSITION_KEY = "right.target"

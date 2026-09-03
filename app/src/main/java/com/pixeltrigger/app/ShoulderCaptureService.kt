@@ -31,6 +31,7 @@ class ShoulderCaptureService : Service() {
 
     private lateinit var windowManager: WindowManager
     private lateinit var prefs: SharedPreferences
+    private lateinit var positionStore: OrientationPositionStore
     private lateinit var shoulderInput: ShoulderShizukuEngine
     private val mainHandler = Handler(android.os.Looper.getMainLooper())
 
@@ -55,6 +56,7 @@ class ShoulderCaptureService : Service() {
         super.onCreate()
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
         prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+        positionStore = OrientationPositionStore(prefs)
         engineEnabled = prefs.getBoolean(KEY_ENGINE_ENABLED, true)
         configureDetectors()
         shoulderInput = ShoulderShizukuEngine(this)
@@ -105,8 +107,22 @@ class ShoulderCaptureService : Service() {
 
     private fun consumeSharedFrame(image: Image, sourceWidth: Int, sourceHeight: Int) {
         if (rView == null || !engineEnabled || editSide != null) return
-        if (sourceWidth > 0) screenWidth = sourceWidth
-        if (sourceHeight > 0) screenHeight = sourceHeight
+        if (
+            sourceWidth > 0 && sourceHeight > 0 &&
+            (sourceWidth != screenWidth || sourceHeight != screenHeight)
+        ) {
+            screenWidth = sourceWidth
+            screenHeight = sourceHeight
+            mainHandler.post {
+                restoreCirclePositionsForCurrentProfile()
+                rDetector.resetForSensorMove()
+                lDetector.resetForSensorMove()
+                refreshStatusViews()
+            }
+            // Skip the transition frame so stale portrait coordinates can
+            // never be sampled against landscape geometry (or vice versa).
+            return
+        }
         if (screenWidth <= 0 || screenHeight <= 0) return
 
         val crop = image.cropRect
@@ -197,15 +213,28 @@ class ShoulderCaptureService : Service() {
 
     private fun createCircle(side: Side): SensorOverlayView {
         val view = SensorOverlayView(this, visibleDiameter)
+        val prefix = shoulderPositionPrefix(side)
+        val saved = positionStore.load(
+            keyPrefix = prefix,
+            screenWidth = screenWidth,
+            screenHeight = screenHeight,
+            overlayWidth = touchSize,
+            overlayHeight = touchSize,
+            fallbackX = normalizedPosition(side, "x", defaultX(side), screenWidth),
+            fallbackY = normalizedPosition(side, "y", screenHeight / 2 - touchSize / 2, screenHeight),
+        )
         val lp = overlayParams(touchSize, touchSize).apply {
-            x = normalizedPosition(side, "x", defaultX(side), screenWidth)
-            y = normalizedPosition(side, "y", screenHeight / 2 - touchSize / 2, screenHeight)
+            x = saved.x
+            y = saved.y
             flags = baseFlags() or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
         }
         clamp(lp, touchSize, touchSize)
         if (side == Side.R) rParams = lp else lParams = lp
         windowManager.addView(view, lp)
         attachDrag(view, lp, side)
+        if (positionStore.isPortrait(screenWidth, screenHeight) && !positionStore.hasSaved(prefix, screenWidth, screenHeight)) {
+            savePosition(side, lp)
+        }
         return view
     }
 
@@ -221,10 +250,52 @@ class ShoulderCaptureService : Service() {
     }
 
     private fun savePosition(side: Side, lp: WindowManager.LayoutParams) {
-        prefs.edit()
-            .putFloat(positionKey(side, "x"), lp.x.toFloat() / screenWidth.toFloat())
-            .putFloat(positionKey(side, "y"), lp.y.toFloat() / screenHeight.toFloat())
-            .apply()
+        positionStore.save(
+            keyPrefix = shoulderPositionPrefix(side),
+            x = lp.x,
+            y = lp.y,
+            screenWidth = screenWidth,
+            screenHeight = screenHeight,
+            overlayWidth = touchSize,
+            overlayHeight = touchSize,
+        )
+        // Preserve the old normalized portrait keys for downgrade/source
+        // compatibility, but landscape must never overwrite them.
+        if (positionStore.isPortrait(screenWidth, screenHeight)) {
+            prefs.edit()
+                .putFloat(positionKey(side, "x"), lp.x.toFloat() / screenWidth.toFloat())
+                .putFloat(positionKey(side, "y"), lp.y.toFloat() / screenHeight.toFloat())
+                .apply()
+        }
+    }
+
+    private fun shoulderPositionPrefix(side: Side): String =
+        "shoulder.${side.name.lowercase()}"
+
+    private fun restoreCirclePositionsForCurrentProfile() {
+        restoreSidePosition(Side.R, rView, rParams)
+        restoreSidePosition(Side.L, lView, lParams)
+    }
+
+    private fun restoreSidePosition(
+        side: Side,
+        view: SensorOverlayView?,
+        lp: WindowManager.LayoutParams?,
+    ) {
+        if (view == null || lp == null) return
+        val saved = positionStore.load(
+            keyPrefix = shoulderPositionPrefix(side),
+            screenWidth = screenWidth,
+            screenHeight = screenHeight,
+            overlayWidth = touchSize,
+            overlayHeight = touchSize,
+            fallbackX = normalizedPosition(side, "x", defaultX(side), screenWidth),
+            fallbackY = normalizedPosition(side, "y", screenHeight / 2 - touchSize / 2, screenHeight),
+        )
+        lp.x = saved.x
+        lp.y = saved.y
+        clamp(lp, touchSize, touchSize)
+        runCatching { windowManager.updateViewLayout(view, lp) }
     }
 
     private fun positionKey(side: Side, axis: String) = "shoulder_${side.name.lowercase()}_${axis}"

@@ -51,6 +51,7 @@ class ScreenCaptureService : Service() {
     private lateinit var windowManager: WindowManager
     private lateinit var preferences: SharedPreferences
     private lateinit var shoulderPreferences: SharedPreferences
+    private lateinit var positionStore: OrientationPositionStore
     private val mainHandler = Handler(android.os.Looper.getMainLooper())
 
     private var captureThread: HandlerThread? = null
@@ -84,6 +85,7 @@ class ScreenCaptureService : Service() {
     private var targetView: TargetOverlayView? = null
     private var targetParams: WindowManager.LayoutParams? = null
     private var targetTouchSize = 1
+    private var targetVisibleDiameter = 1
 
     private lateinit var manualTapPair: ManualNubiaPairController
 
@@ -125,6 +127,7 @@ class ScreenCaptureService : Service() {
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
         preferences = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
         shoulderPreferences = getSharedPreferences(ShoulderCaptureService.PREFS_NAME, MODE_PRIVATE)
+        positionStore = OrientationPositionStore(preferences)
         circlesVisible = preferences.getBoolean(KEY_CIRCLES_VISIBLE, true)
         engineEnabled = preferences.getBoolean(KEY_RIGHT_ENGINE_ENABLED, true)
         shoulderHalfEnabled = shoulderPreferences.getBoolean(ShoulderCaptureService.KEY_ENGINE_ENABLED, true)
@@ -336,9 +339,10 @@ class ScreenCaptureService : Service() {
             val defaultX = if (group == GROUP_FIVE_INDEX) groupFiveDefaultX(0)
             else screenWidth / 2 - sensorTouchSize / 2
             val defaultY = screenHeight / 2 - sensorTouchSize / 2
+            val savedPosition = loadRightSensorPosition(group, 0, defaultX, defaultY)
             val lp = overlayParams(sensorTouchSize, sensorTouchSize).apply {
-                x = preferences.getInt(sensorKeyX(group), defaultX)
-                y = preferences.getInt(sensorKeyY(group), defaultY)
+                x = savedPosition.x
+                y = savedPosition.y
             }
             sensorViews[group] = sensor
             sensorParams[group] = lp
@@ -347,26 +351,30 @@ class ScreenCaptureService : Service() {
             val savedGroup = group
             attachDrag(sensor, lp, sensorVisibleDiameter) { x, y ->
                 detectionEngines[savedGroup].resetForSensorMove()
-                preferences.edit().putInt(sensorKeyX(savedGroup), x).putInt(sensorKeyY(savedGroup), y).apply()
+                saveRightSensorPosition(savedGroup, 0, x, y)
             }
             group++
         }
 
         createGroupFiveExtraSensors()
 
-        val targetVisibleDiameter = max(mmToPx(5f), dp(12))
+        targetVisibleDiameter = max(mmToPx(5f), dp(12))
         targetTouchSize = max(dp(52), dp(24) + targetVisibleDiameter)
         val target = TargetOverlayView(this, targetVisibleDiameter)
+        val savedTargetPosition = loadTargetPosition(
+            screenWidth / 2 + dp(70),
+            screenHeight / 2 - targetTouchSize / 2,
+        )
         val targetLp = overlayParams(targetTouchSize, targetTouchSize).apply {
-            x = preferences.getInt(KEY_TARGET_X, screenWidth / 2 + dp(70))
-            y = preferences.getInt(KEY_TARGET_Y, screenHeight / 2 - targetTouchSize / 2)
+            x = savedTargetPosition.x
+            y = savedTargetPosition.y
         }
         targetView = target
         targetParams = targetLp
         clampCirclePosition(targetLp, targetVisibleDiameter)
         windowManager.addView(target, targetLp)
         attachDrag(target, targetLp, targetVisibleDiameter) { x, y ->
-            preferences.edit().putInt(KEY_TARGET_X, x).putInt(KEY_TARGET_Y, y).apply()
+            saveTargetPosition(x, y)
         }
 
         manualTapPair = ManualNubiaPairController(this, windowManager, preferences)
@@ -401,9 +409,15 @@ class ScreenCaptureService : Service() {
         while (extra < GROUP_FIVE_EXTRA_COUNT) {
             val slot = extra + 1
             val sensor = SensorOverlayView(this, sensorVisibleDiameter)
+            val savedPosition = loadRightSensorPosition(
+                GROUP_FIVE_INDEX,
+                slot,
+                groupFiveDefaultX(slot),
+                groupFiveDefaultY(),
+            )
             val lp = overlayParams(sensorTouchSize, sensorTouchSize).apply {
-                x = preferences.getInt(sensorKeyX(GROUP_FIVE_INDEX, slot), groupFiveDefaultX(slot))
-                y = preferences.getInt(sensorKeyY(GROUP_FIVE_INDEX, slot), groupFiveDefaultY())
+                x = savedPosition.x
+                y = savedPosition.y
             }
             groupFiveExtraViews[extra] = sensor
             groupFiveExtraParams[extra] = lp
@@ -412,10 +426,7 @@ class ScreenCaptureService : Service() {
             val savedExtra = extra
             attachDrag(sensor, lp, sensorVisibleDiameter) { x, y ->
                 groupFiveExtraEngines[savedExtra].resetForSensorMove()
-                preferences.edit()
-                    .putInt(sensorKeyX(GROUP_FIVE_INDEX, savedExtra + 1), x)
-                    .putInt(sensorKeyY(GROUP_FIVE_INDEX, savedExtra + 1), y)
-                    .apply()
+                saveRightSensorPosition(GROUP_FIVE_INDEX, savedExtra + 1, x, y)
             }
             extra++
         }
@@ -601,10 +612,7 @@ class ScreenCaptureService : Service() {
                     lp.y = groupFiveDefaultY()
                     clampCirclePosition(lp, sensorVisibleDiameter)
                     runCatching { windowManager.updateViewLayout(view, lp) }
-                    preferences.edit()
-                        .putInt(sensorKeyX(GROUP_FIVE_INDEX, slot), lp.x)
-                        .putInt(sensorKeyY(GROUP_FIVE_INDEX, slot), lp.y)
-                        .apply()
+                    saveRightSensorPosition(GROUP_FIVE_INDEX, slot, lp.x, lp.y)
                 }
                 slot++
             }
@@ -620,7 +628,7 @@ class ScreenCaptureService : Service() {
         lp.y = screenHeight / 2 - sensorTouchSize / 2
         clampCirclePosition(lp, sensorVisibleDiameter)
         runCatching { windowManager.updateViewLayout(view, lp) }
-        preferences.edit().putInt(sensorKeyX(activeGroup), lp.x).putInt(sensorKeyY(activeGroup), lp.y).apply()
+        saveRightSensorPosition(activeGroup, 0, lp.x, lp.y)
         resetGroupDetectors(activeGroup)
         refreshSensorStatus(tapEngine.isReady())
         showMessage("أعيدت دائرة المجموعة ${activeGroup + 1} إلى المنتصف")
@@ -1142,23 +1150,7 @@ class ScreenCaptureService : Service() {
             resetAllRightDetectors()
         }
 
-        sensorParams.forEachIndexed { i, lp ->
-            val view = sensorViews[i]
-            if (lp != null && view != null) {
-                clampCirclePosition(lp, sensorVisibleDiameter)
-                runCatching { windowManager.updateViewLayout(view, lp) }
-            }
-        }
-        groupFiveExtraParams.forEachIndexed { i, lp ->
-            val view = groupFiveExtraViews[i]
-            if (lp != null && view != null) {
-                clampCirclePosition(lp, sensorVisibleDiameter)
-                runCatching { windowManager.updateViewLayout(view, lp) }
-            }
-        }
-        targetParams?.let { lp ->
-            targetView?.let { runCatching { windowManager.updateViewLayout(it, lp) } }
-        }
+        restoreRightOverlayPositionsForCurrentProfile()
         if (::manualTapPair.isInitialized) manualTapPair.updateBounds(screenWidth, screenHeight)
         menuButtonParams?.let { lp ->
             clampPosition(lp)
@@ -1239,6 +1231,127 @@ class ScreenCaptureService : Service() {
         val x = metrics.xdpi.takeIf { it.isFinite() && it in 100f..1000f } ?: metrics.densityDpi.toFloat()
         val y = metrics.ydpi.takeIf { it.isFinite() && it in 100f..1000f } ?: metrics.densityDpi.toFloat()
         return (mm * ((x + y) / 2f) / 25.4f).roundToInt()
+    }
+
+    private fun rightSensorPositionKey(group: Int, slot: Int): String =
+        "right.monitor.g${group + 1}.s${slot + 1}"
+
+    private fun loadRightSensorPosition(
+        group: Int,
+        slot: Int,
+        fallbackX: Int,
+        fallbackY: Int,
+    ): OrientationPositionStore.Position = positionStore.load(
+        keyPrefix = rightSensorPositionKey(group, slot),
+        screenWidth = screenWidth,
+        screenHeight = screenHeight,
+        overlayWidth = sensorTouchSize,
+        overlayHeight = sensorTouchSize,
+        fallbackX = fallbackX,
+        fallbackY = fallbackY,
+        legacyXKey = sensorKeyX(group, slot),
+        legacyYKey = sensorKeyY(group, slot),
+    )
+
+    private fun saveRightSensorPosition(group: Int, slot: Int, x: Int, y: Int) {
+        positionStore.save(
+            keyPrefix = rightSensorPositionKey(group, slot),
+            x = x,
+            y = y,
+            screenWidth = screenWidth,
+            screenHeight = screenHeight,
+            overlayWidth = sensorTouchSize,
+            overlayHeight = sensorTouchSize,
+            legacyXKey = sensorKeyX(group, slot),
+            legacyYKey = sensorKeyY(group, slot),
+        )
+    }
+
+    private fun loadTargetPosition(
+        fallbackX: Int,
+        fallbackY: Int,
+    ): OrientationPositionStore.Position = positionStore.load(
+        keyPrefix = RIGHT_TARGET_POSITION_KEY,
+        screenWidth = screenWidth,
+        screenHeight = screenHeight,
+        overlayWidth = targetTouchSize,
+        overlayHeight = targetTouchSize,
+        fallbackX = fallbackX,
+        fallbackY = fallbackY,
+        legacyXKey = KEY_TARGET_X,
+        legacyYKey = KEY_TARGET_Y,
+    )
+
+    private fun saveTargetPosition(x: Int, y: Int) {
+        positionStore.save(
+            keyPrefix = RIGHT_TARGET_POSITION_KEY,
+            x = x,
+            y = y,
+            screenWidth = screenWidth,
+            screenHeight = screenHeight,
+            overlayWidth = targetTouchSize,
+            overlayHeight = targetTouchSize,
+            legacyXKey = KEY_TARGET_X,
+            legacyYKey = KEY_TARGET_Y,
+        )
+    }
+
+    /**
+     * Rotation never clamps the previous orientation in-place. Every
+     * overlay is reloaded from the profile belonging to the new geometry.
+     * If that profile has never been edited, OrientationPositionStore only
+     * projects the opposite profile temporarily and leaves it untouched.
+     */
+    private fun restoreRightOverlayPositionsForCurrentProfile() {
+        var group = 0
+        while (group < GROUP_COUNT) {
+            val lp = sensorParams[group]
+            val view = sensorViews[group]
+            if (lp != null && view != null) {
+                val fallbackX = if (group == GROUP_FIVE_INDEX) groupFiveDefaultX(0)
+                else screenWidth / 2 - sensorTouchSize / 2
+                val fallbackY = screenHeight / 2 - sensorTouchSize / 2
+                val saved = loadRightSensorPosition(group, 0, fallbackX, fallbackY)
+                lp.x = saved.x
+                lp.y = saved.y
+                clampCirclePosition(lp, sensorVisibleDiameter)
+                runCatching { windowManager.updateViewLayout(view, lp) }
+            }
+            group++
+        }
+
+        var extra = 0
+        while (extra < GROUP_FIVE_EXTRA_COUNT) {
+            val slot = extra + 1
+            val lp = groupFiveExtraParams[extra]
+            val view = groupFiveExtraViews[extra]
+            if (lp != null && view != null) {
+                val saved = loadRightSensorPosition(
+                    GROUP_FIVE_INDEX,
+                    slot,
+                    groupFiveDefaultX(slot),
+                    groupFiveDefaultY(),
+                )
+                lp.x = saved.x
+                lp.y = saved.y
+                clampCirclePosition(lp, sensorVisibleDiameter)
+                runCatching { windowManager.updateViewLayout(view, lp) }
+            }
+            extra++
+        }
+
+        val targetLp = targetParams
+        val target = targetView
+        if (targetLp != null && target != null) {
+            val saved = loadTargetPosition(
+                screenWidth / 2 + dp(70),
+                screenHeight / 2 - targetTouchSize / 2,
+            )
+            targetLp.x = saved.x
+            targetLp.y = saved.y
+            clampCirclePosition(targetLp, targetVisibleDiameter)
+            runCatching { windowManager.updateViewLayout(target, targetLp) }
+        }
     }
 
     private fun sensorKeyX(group: Int, slot: Int = 0): String = when {
@@ -1358,5 +1471,6 @@ class ScreenCaptureService : Service() {
         private const val KEY_RIGHT_ENGINE_ENABLED = "right_half_enabled"
         private const val KEY_WHITE_REARM = "white_rearm_enabled"
         private const val KEY_REARM_DELAY_ENABLED = "rearm_delay_enabled"
+        private const val RIGHT_TARGET_POSITION_KEY = "right.target"
     }
 }

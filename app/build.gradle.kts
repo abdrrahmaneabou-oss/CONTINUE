@@ -11,8 +11,8 @@ android {
         applicationId = "com.pixeltrigger.app"
         minSdk = 29
         targetSdk = 35
-        versionCode = 58
-        versionName = "5.0-group5-triple-restore-state"
+        versionCode = 59
+        versionName = "5.0-orientation-position-profiles"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 

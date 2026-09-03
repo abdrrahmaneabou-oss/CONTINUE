@@ -26,6 +26,8 @@ internal class ManualNubiaPairController(
 ) {
     private enum class Binding { R, L }
 
+    private val positionStore = OrientationPositionStore(preferences)
+
     private data class Circle(
         val view: ManualCircleView,
         val params: WindowManager.LayoutParams,
@@ -59,6 +61,17 @@ internal class ManualNubiaPairController(
 
         val triggerDiameter = mmToPx(TRIGGER_DIAMETER_MM)
         val view = ManualCircleView(context, triggerDiameter)
+        val savedPosition = positionStore.load(
+            keyPrefix = MANUAL_POSITION_KEY,
+            screenWidth = screenWidth,
+            screenHeight = screenHeight,
+            overlayWidth = triggerDiameter,
+            overlayHeight = triggerDiameter,
+            fallbackX = dp(16),
+            fallbackY = screenHeight / 2 - triggerDiameter / 2,
+            legacyXKey = KEY_TRIGGER_X,
+            legacyYKey = KEY_TRIGGER_Y,
+        )
         val params = WindowManager.LayoutParams(
             triggerDiameter,
             triggerDiameter,
@@ -67,8 +80,8 @@ internal class ManualNubiaPairController(
             android.graphics.PixelFormat.TRANSLUCENT,
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = preferences.getInt(KEY_TRIGGER_X, dp(16))
-            y = preferences.getInt(KEY_TRIGGER_Y, screenHeight / 2 - triggerDiameter / 2)
+            x = savedPosition.x
+            y = savedPosition.y
         }
         val created = Circle(view, params, KEY_TRIGGER_X, KEY_TRIGGER_Y)
         clamp(params)
@@ -124,6 +137,19 @@ internal class ManualNubiaPairController(
         screenWidth = width.coerceAtLeast(1)
         screenHeight = height.coerceAtLeast(1)
         circle?.let { current ->
+            val saved = positionStore.load(
+                keyPrefix = MANUAL_POSITION_KEY,
+                screenWidth = screenWidth,
+                screenHeight = screenHeight,
+                overlayWidth = current.params.width,
+                overlayHeight = current.params.height,
+                fallbackX = dp(16),
+                fallbackY = screenHeight / 2 - current.params.height / 2,
+                legacyXKey = current.keyX,
+                legacyYKey = current.keyY,
+            )
+            current.params.x = saved.x
+            current.params.y = saved.y
             clamp(current.params)
             runCatching { windowManager.updateViewLayout(current.view, current.params) }
         }
@@ -219,10 +245,17 @@ internal class ManualNubiaPairController(
     }
 
     private fun save(current: Circle) {
-        preferences.edit()
-            .putInt(current.keyX, current.params.x)
-            .putInt(current.keyY, current.params.y)
-            .apply()
+        positionStore.save(
+            keyPrefix = MANUAL_POSITION_KEY,
+            x = current.params.x,
+            y = current.params.y,
+            screenWidth = screenWidth,
+            screenHeight = screenHeight,
+            overlayWidth = current.params.width,
+            overlayHeight = current.params.height,
+            legacyXKey = current.keyX,
+            legacyYKey = current.keyY,
+        )
     }
 
     private fun clamp(params: WindowManager.LayoutParams) {
@@ -315,5 +348,6 @@ internal class ManualNubiaPairController(
         private const val KEY_TRIGGER_X = "manual_pair_trigger_x"
         private const val KEY_TRIGGER_Y = "manual_pair_trigger_y"
         private const val KEY_BINDING = "manual_shoulder_binding"
+        private const val MANUAL_POSITION_KEY = "manual.trigger"
     }
 }

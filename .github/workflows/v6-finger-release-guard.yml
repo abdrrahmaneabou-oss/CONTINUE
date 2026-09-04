@@ -1,0 +1,53 @@
+name: V6 finger release ownership guard
+
+on:
+  push:
+    branches: [ v6-analog-shoulder ]
+
+permissions:
+  contents: write
+
+jobs:
+  patch-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - name: Install Android SDK, NDK and CMake
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;27.2.12479018" "cmake;3.22.1"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+      - name: Guard finger-owned UP
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('app/src/main/java/com/pixeltrigger/app/ShoulderCaptureService.kt')
+          s = p.read_text()
+          old = '''    /** V6 finger UP/CANCEL. No duration is guessed; UP happens at this call. */\n    private fun endFingerHoldSide(requestedSide: Side?): Boolean {\n        if (!::shoulderInput.isInitialized) return false\n        val target = requestedSide ?: fingerHeldSide\n        if (target == null) {\n            fingerReservedSide = null\n            return true\n        }\n        val released = if (target == Side.R) shoulderInput.releaseR() else shoulderInput.releaseL()\n        if (fingerHeldSide == target || requestedSide == null) fingerHeldSide = null\n        if (fingerReservedSide == target || requestedSide == null) fingerReservedSide = null\n        onManualReservationChanged()\n        return released\n    }'''
+          new = '''    /** V6 finger UP/CANCEL. No duration is guessed; UP happens at this call. */\n    private fun endFingerHoldSide(requestedSide: Side?): Boolean {\n        if (!::shoulderInput.isInitialized) return false\n        val held = fingerHeldSide\n        val target = requestedSide ?: held\n        if (target == null) {\n            fingerReservedSide = null\n            return true\n        }\n\n        // V6 must never release a timed/manual shoulder press it does not own.\n        // Only the side currently reserved/held by the finger-driven controller\n        // is eligible for this immediate UP.\n        if (held != target && fingerReservedSide != target) return true\n\n        val released = if (target == Side.R) shoulderInput.releaseR() else shoulderInput.releaseL()\n        if (fingerHeldSide == target || requestedSide == null) fingerHeldSide = null\n        if (fingerReservedSide == target || requestedSide == null) fingerReservedSide = null\n        onManualReservationChanged()\n        return released\n    }'''
+          if old not in s:
+              raise SystemExit('finger release method anchor not found')
+          p.write_text(s.replace(old, new, 1))
+          PY
+          git diff --check
+      - name: Test and build
+        run: gradle --no-daemon --rerun-tasks clean :app:testDebugUnitTest :app:assembleDebug --stacktrace
+      - name: Commit clean ownership fix
+        shell: bash
+        run: |
+          rm -f .github/workflows/v6-finger-release-guard.yml
+          git config user.name 'CHATGPT'
+          git config user.email 'abdrrahmaneabou@gmail.com'
+          git add -A
+          git commit -m 'fix: release only V6-owned shoulder holds'
+          git push origin HEAD:v6-analog-shoulder

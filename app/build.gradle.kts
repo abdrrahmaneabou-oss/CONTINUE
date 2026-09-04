@@ -11,8 +11,8 @@ android {
         applicationId = "com.pixeltrigger.app"
         minSdk = 29
         targetSdk = 35
-        versionCode = 64
-        versionName = "6.2-fast-monitor-brake"
+        versionCode = 65
+        versionName = "6.3-final-drag-sensitivity"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 

@@ -45,6 +45,9 @@ class AnalogShoulderController(
     private var decisionDelayMs = normalizeDecisionDelay(
         prefs.getInt(KEY_DECISION_DELAY_MS, DEFAULT_DECISION_DELAY_MS),
     )
+    var dragSensitivity: Int = prefs.getInt(KEY_DRAG_SENSITIVITY, DEFAULT_DRAG_SENSITIVITY)
+        .coerceIn(DRAG_SENSITIVITY_MIN, DRAG_SENSITIVITY_MAX)
+        private set
 
     var fastEnabled: Boolean = prefs.getBoolean(KEY_FAST_ENABLED, false)
         private set
@@ -66,13 +69,16 @@ class AnalogShoulderController(
     private var decision = Decision.IDLE
     private var pressBinding = Binding.L
     private var outputDown = false
-    private var fingerOffsetX = 0f
-    private var fingerOffsetY = 0f
+    private var fingerDownRawX = 0f
+    private var fingerDownRawY = 0f
+    private var dragStartCenterX = 0f
+    private var dragStartCenterY = 0f
     private var pendingDecisionRunnable: Runnable? = null
 
     val baseSizeLabel: String get() = formatSize(baseSizeHundredths)
     val knobSizeLabel: String get() = formatSize(knobSizeHundredths)
     val decisionDelayLabel: String get() = "$decisionDelayMs ms"
+    val dragSensitivityLabel: String get() = "$dragSensitivity / 100"
     val fastLabel: String get() = if (fastEnabled) "FAST ON" else "FAST OFF"
     val brakeLabel: String get() = if (brakeEnabled) "مكابح المراقبة ON" else "مكابح المراقبة OFF"
 
@@ -189,6 +195,13 @@ class AnalogShoulderController(
     fun decreaseDecisionDelay() = setDecisionDelay(decisionDelayMs - DECISION_DELAY_STEP_MS)
     fun increaseDecisionDelay() = setDecisionDelay(decisionDelayMs + DECISION_DELAY_STEP_MS)
 
+    fun setDragSensitivity(value: Int) {
+        val normalized = value.coerceIn(DRAG_SENSITIVITY_MIN, DRAG_SENSITIVITY_MAX)
+        if (normalized == dragSensitivity) return
+        dragSensitivity = normalized
+        prefs.edit().putInt(KEY_DRAG_SENSITIVITY, normalized).apply()
+    }
+
     fun toggleFast() {
         fastEnabled = !fastEnabled
         prefs.edit().putBoolean(KEY_FAST_ENABLED, fastEnabled).apply()
@@ -264,8 +277,10 @@ class AnalogShoulderController(
                     if (!isVisible || isEditing || !inputEnabled) return@setOnTouchListener true
                     forceRelease()
                     val center = knobCenter()
-                    fingerOffsetX = event.rawX - center.first
-                    fingerOffsetY = event.rawY - center.second
+                    fingerDownRawX = event.rawX
+                    fingerDownRawY = event.rawY
+                    dragStartCenterX = center.first
+                    dragStartCenterY = center.second
                     decision = Decision.PENDING
                     view.alpha = 0.90f
                     rebuildKnobVisual()
@@ -275,9 +290,10 @@ class AnalogShoulderController(
 
                 MotionEvent.ACTION_MOVE -> {
                     if (!isEditing && inputEnabled && isVisible) {
+                        val sensitivityScale = dragSensitivity / 100f
                         val reachedRLimit = moveKnobToward(
-                            event.rawX - fingerOffsetX,
-                            event.rawY - fingerOffsetY,
+                            dragStartCenterX + (event.rawX - fingerDownRawX) * sensitivityScale,
+                            dragStartCenterY + (event.rawY - fingerDownRawY) * sensitivityScale,
                         )
                         if (decision == Decision.PENDING && reachedRLimit) {
                             activateDecision(Binding.R)
@@ -607,6 +623,7 @@ class AnalogShoulderController(
         private const val KEY_BASE_SIZE = "v6_analog_base_size_hundredths_cm"
         private const val KEY_KNOB_SIZE = "v6_analog_knob_size_hundredths_cm"
         private const val KEY_DECISION_DELAY_MS = "v6_analog_decision_delay_ms"
+        private const val KEY_DRAG_SENSITIVITY = "v6_analog_drag_sensitivity"
         private const val KEY_FAST_ENABLED = "v6_analog_fast_enabled"
         private const val KEY_BRAKE_ENABLED = "v6_analog_brake_enabled"
         private const val KEY_VISIBLE = "v6_analog_visible"
@@ -615,12 +632,15 @@ class AnalogShoulderController(
         private const val DEFAULT_BASE_SIZE = 155
         private const val DEFAULT_KNOB_SIZE = 125
         private const val DEFAULT_DECISION_DELAY_MS = 150
+        private const val DEFAULT_DRAG_SENSITIVITY = 100
+        private const val DRAG_SENSITIVITY_MIN = 1
+        private const val DRAG_SENSITIVITY_MAX = 100
         private const val DECISION_DELAY_MIN_MS = 50
         private const val DECISION_DELAY_MAX_MS = 500
         private const val DECISION_DELAY_STEP_MS = 50
 
-        // Requested progression: 0.25, 0.35, ... 1.95, with 2.00 as the final cap.
-        private val SIZE_STEPS = ((25..195 step 10).toList() + 200).toIntArray()
+        // Preserve the requested 0.10 cm progression and extend the final cap to 3.00 cm.
+        private val SIZE_STEPS = ((25..295 step 10).toList() + 300).toIntArray()
 
         private fun normalizeSize(value: Int): Int = SIZE_STEPS.minByOrNull { kotlin.math.abs(it - value) } ?: 25
 

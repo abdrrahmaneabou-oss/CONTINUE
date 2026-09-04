@@ -32,6 +32,7 @@ import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
+import android.widget.SeekBar
 import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
@@ -1115,6 +1116,7 @@ class ScreenCaptureService : Service() {
                 ),
                 matchWrap(dp(44)),
             )
+            content.addView(analogSensitivityRow(), matchWrap(dp(48)))
             val fastBrakeRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
             fastBrakeRow.addView(
                 microCard(analogShoulder.fastLabel) {
@@ -1147,7 +1149,7 @@ class ScreenCaptureService : Service() {
             content.addView(brakeEditRow, matchWrap(dp(40)))
             content.addView(
                 TextView(this).apply {
-                    text = "R قبل WAIT = فوري • FAST يسمح L→R بعد WAIT • الأخضر يمنع/يوقف R/L • الأحمر يسمح ويعيد التشغيل ما دام الإصبع ضاغطًا"
+                    text = "R قبل WAIT = فوري • FAST يسمح L→R بعد WAIT • SENS 100 = الحركة الحالية و1 = ثقيلة جدًا • الأخضر يمنع/يوقف R/L • الأحمر يسمح ويعيد التشغيل ما دام الإصبع ضاغطًا"
                     textSize = 10.5f
                     gravity = Gravity.CENTER
                     setTextColor(Color.rgb(55, 75, 86))
@@ -1277,6 +1279,36 @@ class ScreenCaptureService : Service() {
         row.addView(current, LinearLayout.LayoutParams(0, dp(40), 1f))
         row.addView(microCard("+") { increase(); refresh() }, LinearLayout.LayoutParams(dp(58), dp(40)))
         refresh()
+        return row
+    }
+
+    private fun analogSensitivityRow(): View {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(4), 0, dp(4), 0)
+        }
+        val label = TextView(this).apply {
+            textSize = 11f
+            gravity = Gravity.CENTER
+            setTextColor(Color.rgb(42, 65, 78))
+        }
+        val seek = SeekBar(this).apply {
+            max = 99
+            progress = analogShoulder.dragSensitivity - 1
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                    if (!fromUser) return
+                    analogShoulder.setDragSensitivity(progress + 1)
+                    label.text = "SENS  ${analogShoulder.dragSensitivityLabel}"
+                }
+                override fun onStartTrackingTouch(seekBar: SeekBar?) = Unit
+                override fun onStopTrackingTouch(seekBar: SeekBar?) = Unit
+            })
+        }
+        label.text = "SENS  ${analogShoulder.dragSensitivityLabel}"
+        row.addView(label, LinearLayout.LayoutParams(dp(96), dp(44)))
+        row.addView(seek, LinearLayout.LayoutParams(0, dp(44), 1f))
         return row
     }
 

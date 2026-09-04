@@ -11,8 +11,8 @@ android {
         applicationId = "com.pixeltrigger.app"
         minSdk = 29
         targetSdk = 35
-        versionCode = 62
-        versionName = "6.0-clean-menu-quarter-hold"
+        versionCode = 63
+        versionName = "6.0-final-white-gate-visibility"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 

@@ -227,6 +227,7 @@ private fun holdLabel(side: Side): String {
         rView = createCircle(Side.R)
         lView = createCircle(Side.L)
         updateCircleTouchability()
+        updateEngineVisuals()
         refreshStatusViews()
     }
 
@@ -405,7 +406,14 @@ private fun holdLabel(side: Side): String {
         if (!enabled) shoulderInput.releaseAll()
         rDetector.resetForSensorMove()
         lDetector.resetForSensorMove()
+        updateEngineVisuals()
         refreshStatusViews()
+    }
+
+    private fun updateEngineVisuals() {
+        val alpha = if (engineEnabled) 1f else 0f
+        rView?.alpha = alpha
+        lView?.alpha = alpha
     }
 
     private fun onManualReservationChanged() {

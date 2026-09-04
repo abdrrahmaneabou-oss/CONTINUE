@@ -5,11 +5,18 @@ import android.content.SharedPreferences
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.PorterDuff
+import android.graphics.PorterDuffXfermode
+import android.media.Image
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
+import com.pixeltrigger.app.engine.DetectionEngine
+import com.pixeltrigger.app.engine.PixelSampler
 import kotlin.math.max
 import kotlin.math.roundToInt
 
@@ -27,6 +34,7 @@ internal class ManualNubiaPairController(
     private enum class Binding { R, L }
 
     private val positionStore = OrientationPositionStore(preferences)
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     private data class Circle(
         val view: ManualCircleView,
@@ -39,6 +47,7 @@ internal class ManualNubiaPairController(
     private var screenHeight = 1
     private var circle: Circle? = null
     private var lastFireAtMs = 0L
+    @Volatile private var monitorWhite = false
     private var binding: Binding = when (preferences.getString(KEY_BINDING, Binding.R.name)) {
         Binding.L.name -> Binding.L
         else -> Binding.R
@@ -57,6 +66,19 @@ internal class ManualNubiaPairController(
     /** UI-only R/L swap. Real binding and execution stay unchanged. */
     val displayBindingLabel: String
         get() = if (binding == Binding.R) Binding.L.name else Binding.R.name
+
+    val isMonitorWhite: Boolean
+        get() = monitorWhite
+
+    val isOperational: Boolean
+        get() = isEnabled && monitorWhite
+
+    val statusLabel: String
+        get() = when {
+            !isEnabled -> "OFF"
+            monitorWhite -> "ON"
+            else -> "AUTO OFF"
+        }
 
     fun create(width: Int, height: Int) {
         if (circle != null) return
@@ -105,8 +127,8 @@ internal class ManualNubiaPairController(
     fun toggleEnabled() = setEnabled(!isEnabled)
 
     fun setVisible(visible: Boolean) {
+        // Visibility is presentation-only: false means 80% transparent.
         isVisible = visible
-        if (!visible) isEditing = false
         preferences.edit().putBoolean(KEY_VISIBLE, visible).apply()
         applyState()
     }
@@ -159,6 +181,31 @@ internal class ManualNubiaPairController(
         }
     }
 
+    fun processMonitorFrame(image: Image, sourceWidth: Int, sourceHeight: Int) {
+        val current = circle ?: return
+        if (isEditing || sourceWidth <= 0 || sourceHeight <= 0) return
+        val crop = image.cropRect
+        if (crop.width() <= 0 || crop.height() <= 0) return
+
+        val screenCenterX = current.params.x + current.params.width / 2
+        val screenCenterY = current.params.y + current.params.height / 2
+        val centerX = (crop.left + screenCenterX * crop.width().toFloat() / sourceWidth).roundToInt()
+            .coerceIn(crop.left, crop.right - 1)
+        val centerY = (crop.top + screenCenterY * crop.height().toFloat() / sourceHeight).roundToInt()
+            .coerceIn(crop.top, crop.bottom - 1)
+
+        val monitorDiameter = max(mmToPx(MONITOR_DIAMETER_MM), 1)
+        val screenRadius = monitorDiameter / 2f
+        val radiusX = max(0.5f, crop.width() * screenRadius / sourceWidth)
+        val radiusY = max(0.5f, crop.height() * screenRadius / sourceHeight)
+        val sample = PixelSampler.sampleCircularRegion(image, centerX, centerY, radiusX, radiusY)
+        val whiteNow = sample?.isArmingWhite() == true
+        if (whiteNow == monitorWhite) return
+
+        monitorWhite = whiteNow
+        mainHandler.post { applyState() }
+    }
+
     fun destroy() {
         ShoulderCaptureService.clearManualReservation()
         circle?.let { runCatching { windowManager.removeView(it.view) } }
@@ -171,7 +218,7 @@ internal class ManualNubiaPairController(
         var firedForContact = false
         current.view.setOnTouchListener { view, event ->
             if (!isEditing) {
-                if (!isEnabled || !isVisible) return@setOnTouchListener false
+                if (!isEnabled || !monitorWhite) return@setOnTouchListener false
                 when (event.actionMasked) {
                     MotionEvent.ACTION_DOWN -> {
                         if (!view.containsVisibleCircle(event.x, event.y)) {
@@ -228,9 +275,15 @@ internal class ManualNubiaPairController(
 
     private fun applyState() {
         val current = circle ?: return
-        current.view.visibility = if (isVisible) View.VISIBLE else View.INVISIBLE
-        current.view.setState(isEnabled, isEditing, binding.name, displayBindingLabel)
-        val touchable = isEditing || (isEnabled && isVisible)
+        val effectiveEnabled = isEnabled && monitorWhite
+        current.view.visibility = View.VISIBLE
+        current.view.alpha = when {
+            !isEnabled -> 0f
+            isVisible -> 1f
+            else -> HIDDEN_ALPHA
+        }
+        current.view.setState(effectiveEnabled, isEditing, binding.name, displayBindingLabel, monitorWhite)
+        val touchable = isEditing || effectiveEnabled
         current.params.flags = if (touchable) baseFlags()
         else baseFlags() or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
         runCatching { windowManager.updateViewLayout(current.view, current.params) }
@@ -238,7 +291,7 @@ internal class ManualNubiaPairController(
     }
 
     private fun updateManualReservation() {
-        if (!isEnabled || !isVisible) {
+        if (!isEnabled || !monitorWhite) {
             ShoulderCaptureService.clearManualReservation()
             return
         }
@@ -289,6 +342,14 @@ internal class ManualNubiaPairController(
             strokeWidth = dp(2).toFloat()
         }
         private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+        private val monitorRing = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            strokeWidth = dp(1).toFloat()
+        }
+        private val clearPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.FILL
+            xfermode = PorterDuffXfermode(PorterDuff.Mode.CLEAR)
+        }
         private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.FILL
             textAlign = Paint.Align.CENTER
@@ -299,17 +360,22 @@ internal class ManualNubiaPairController(
         private var editing = false
         private var binding = Binding.R.name
         private var displayBinding = Binding.L.name
+        private var monitorWhite = false
+
+        init { setLayerType(LAYER_TYPE_SOFTWARE, null) }
 
         fun setState(
             isEnabled: Boolean,
             isEditing: Boolean,
             bindingName: String,
             displayBindingName: String,
+            isMonitorWhite: Boolean,
         ) {
             enabled = isEnabled
             editing = isEditing
             binding = bindingName
             displayBinding = displayBindingName
+            monitorWhite = isMonitorWhite
             invalidate()
         }
 
@@ -342,7 +408,19 @@ internal class ManualNubiaPairController(
             textPaint.color = stroke.color
             canvas.drawCircle(cx, cy, radius, fill)
             canvas.drawCircle(cx, cy, radius, stroke)
-            val baseline = cy - (textPaint.ascent() + textPaint.descent()) / 2f
+
+            // The sampler looks through the transparent center hole. The visible
+            // monitor ring is outside the sampled ROI, preventing self-sampling.
+            val holeRadius = max(
+                diameter * (MONITOR_HOLE_DIAMETER_MM / TRIGGER_DIAMETER_MM) / 2f,
+                dp(2).toFloat(),
+            )
+            canvas.drawCircle(cx, cy, holeRadius, clearPaint)
+            monitorRing.color = if (monitorWhite) Color.rgb(55, 210, 100) else Color.rgb(225, 70, 82)
+            canvas.drawCircle(cx, cy, holeRadius + monitorRing.strokeWidth, monitorRing)
+
+            val labelCenterY = cy - diameter * 0.22f
+            val baseline = labelCenterY - (textPaint.ascent() + textPaint.descent()) / 2f
             canvas.drawText(displayBinding, cx, baseline, textPaint)
         }
 
@@ -352,6 +430,9 @@ internal class ManualNubiaPairController(
 
     companion object {
         private const val TRIGGER_DIAMETER_MM = 13f
+        private const val MONITOR_DIAMETER_MM = DetectionEngine.SENSOR_DIAMETER_MM
+        private const val MONITOR_HOLE_DIAMETER_MM = 1.2f
+        private const val HIDDEN_ALPHA = 0.20f
         private const val MIN_FIRE_INTERVAL_MS = 120L
 
         private const val KEY_ENABLED = "manual_pair_enabled"

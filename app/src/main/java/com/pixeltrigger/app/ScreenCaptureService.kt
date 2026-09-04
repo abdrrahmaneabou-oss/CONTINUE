@@ -228,6 +228,9 @@ class ScreenCaptureService : Service() {
         // Right half remains first so the independent shoulder half can never
         // delay PixelProbe detection or its confirmed Nubia tap.
         processRightFrame(image)
+        if (::manualTapPair.isInitialized) {
+            manualTapPair.processMonitorFrame(image, screenWidth, screenHeight)
+        }
         ShoulderCaptureService.dispatchSharedFrame(image, screenWidth, screenHeight)
     }
 
@@ -686,6 +689,7 @@ class ScreenCaptureService : Service() {
         preferences.edit().putBoolean(KEY_RIGHT_ENGINE_ENABLED, enabled).apply()
         resetAllRightDetectors()
         refreshSensorStatus(tapEngine.isReady(), if (enabled) null else SensorStatus.OFF)
+        applyGroupVisibility()
         updateButtonVisual()
     }
 
@@ -856,9 +860,9 @@ class ScreenCaptureService : Service() {
         body.addView(
             smallCard(
                 if (circlesVisible) {
-                    if (monitorPlural) "◉ إخفاء الدوائر" else "◉ إخفاء الدائرة"
+                    "◉ إخفاء 80%"
                 } else {
-                    if (monitorPlural) "○ إظهار الدوائر" else "○ إظهار الدائرة"
+                    "○ إظهار 100%"
                 },
             ) {
                 setCirclesVisible(!circlesVisible)
@@ -941,13 +945,17 @@ class ScreenCaptureService : Service() {
                 closeMenu()
                 showMessage("تم حفظ موضع دائرة R/L اليدوية")
             }, LinearLayout.LayoutParams(0, dp(38), 1f))
-            val visibleButton = microCard(if (manualTapPair.isVisible) "◉ إخفاء" else "○ إظهار") {}
+            val visibleButton = microCard(if (manualTapPair.isVisible) "◉ إخفاء 80%" else "○ إظهار 100%") {}
             visibleButton.setOnClickListener {
                 manualTapPair.toggleVisible()
-                visibleButton.text = if (manualTapPair.isVisible) "◉ إخفاء" else "○ إظهار"
+                visibleButton.text = if (manualTapPair.isVisible) "◉ إخفاء 80%" else "○ إظهار 100%"
             }
             manualRow.addView(visibleButton, LinearLayout.LayoutParams(0, dp(38), 1f))
             body.addView(manualRow, matchWrap(dp(40)))
+            body.addView(
+                sectionLabel("مراقبة المركز 0.3mm • أبيض = ON • غير أبيض = OFF", Color.rgb(155, 95, 25)),
+                matchWrap(),
+            )
 
             val bindRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
             val bindRealR = microCard("") {}
@@ -1145,7 +1153,7 @@ class ScreenCaptureService : Service() {
 
     private fun combinedStatusText(): String {
         val manual = if (::manualTapPair.isInitialized) {
-            "MANUAL ${manualTapPair.displayBindingLabel} ${if (manualTapPair.isEnabled) "ON" else "OFF"}"
+            "MANUAL ${manualTapPair.displayBindingLabel} ${manualTapPair.statusLabel}"
         } else {
             "MANUAL OFF"
         }
@@ -1262,14 +1270,28 @@ class ScreenCaptureService : Service() {
     }
 
     private fun applyGroupVisibility() {
+        val activeAlpha = when {
+            !engineEnabled -> 0f
+            circlesVisible -> 1f
+            else -> RIGHT_HIDDEN_ALPHA
+        }
         var i = 0
         while (i < GROUP_COUNT) {
-            sensorViews[i]?.visibility = if (circlesVisible && i == activeGroup) View.VISIBLE else View.INVISIBLE
+            sensorViews[i]?.let { view ->
+                view.visibility = if (i == activeGroup) View.VISIBLE else View.INVISIBLE
+                if (i == activeGroup) view.alpha = activeAlpha
+            }
             i++
         }
-        val groupFiveVisible = circlesVisible && activeGroup == GROUP_FIVE_INDEX
-        groupFiveExtraViews.forEach { it?.visibility = if (groupFiveVisible) View.VISIBLE else View.INVISIBLE }
-        targetView?.visibility = if (circlesVisible) View.VISIBLE else View.INVISIBLE
+        val groupFiveActive = activeGroup == GROUP_FIVE_INDEX
+        groupFiveExtraViews.forEach { view ->
+            view?.visibility = if (groupFiveActive) View.VISIBLE else View.INVISIBLE
+            if (groupFiveActive) view?.alpha = activeAlpha
+        }
+        targetView?.let { view ->
+            view.visibility = View.VISIBLE
+            view.alpha = activeAlpha
+        }
     }
 
     private fun refreshDisplayGeometry() {
@@ -1690,6 +1712,7 @@ class ScreenCaptureService : Service() {
         private const val GROUP_FIVE_MAX_TAPS = 5
         private const val GROUP_FIVE_TAP_GAP_MS = 50L
         private const val MONITOR_DIAMETER_MM = 0.3f
+        private const val RIGHT_HIDDEN_ALPHA = 0.20f
         private const val CAPTURE_SCALE = 0.5f
         private const val DISPLAY_REFRESH_DEBOUNCE_MS = 16L
         private const val ENGINE_HOLD_MS = 500L

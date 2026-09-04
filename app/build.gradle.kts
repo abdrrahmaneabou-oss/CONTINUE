@@ -11,8 +11,8 @@ android {
         applicationId = "com.pixeltrigger.app"
         minSdk = 29
         targetSdk = 35
-        versionCode = 65
-        versionName = "6.3-final-drag-sensitivity"
+        versionCode = 66
+        versionName = "6.4-split-instant-shoulders"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 

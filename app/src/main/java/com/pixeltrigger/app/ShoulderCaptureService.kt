@@ -472,9 +472,10 @@ class ShoulderCaptureService : Service() {
         val r = if (!prefs.getBoolean("shoulder_r_hold", false)) "Flash" else "${prefs.getInt("shoulder_r_seconds", 1).coerceIn(1, 5)}s"
         val l = if (!prefs.getBoolean("shoulder_l_hold", false)) "Flash" else "${prefs.getInt("shoulder_l_seconds", 1).coerceIn(1, 5)}s"
         val state = if (engineEnabled) "ON" else "OFF"
-        val manual = manualReservedSide?.name?.let { " • Manual $it" } ?: ""
-        val finger = fingerReservedSide?.name?.let { " • V6 hold $it" } ?: ""
-        return "R $r  •  L $l  •  $state$manual$finger"
+        fun display(side: Side): String = if (side == Side.R) "L" else "R"
+        val manual = manualReservedSide?.let { " • Manual ${display(it)}" } ?: ""
+        val finger = fingerReservedSide?.let { " • V6 hold ${display(it)}" } ?: ""
+        return "L $r  •  R $l  •  $state$manual$finger"
     }
 
     private fun overlayParams(width: Int, height: Int) = WindowManager.LayoutParams(
@@ -566,7 +567,7 @@ class ShoulderCaptureService : Service() {
             activeInstance?.onManualReservationChanged()
         }
 
-        fun statusSummary(): String = activeInstance?.summary() ?: "R/L starting…"
+        fun statusSummary(): String = activeInstance?.summary() ?: "L/R starting…"
 
         const val ACTION_START = "com.pixeltrigger.app.action.START_SHOULDER"
         const val ACTION_STOP = "com.pixeltrigger.app.action.STOP_SHOULDER"

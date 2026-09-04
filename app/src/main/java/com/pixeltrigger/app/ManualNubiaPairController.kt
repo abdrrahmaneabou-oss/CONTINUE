@@ -332,7 +332,8 @@ internal class ManualNubiaPairController(
             canvas.drawCircle(cx, cy, radius, fill)
             canvas.drawCircle(cx, cy, radius, stroke)
             val baseline = cy - (textPaint.ascent() + textPaint.descent()) / 2f
-            canvas.drawText(binding, cx, baseline, textPaint)
+            val displayBinding = if (binding == Binding.R.name) "L" else "R"
+            canvas.drawText(displayBinding, cx, baseline, textPaint)
         }
 
         private fun dp(value: Int): Int =

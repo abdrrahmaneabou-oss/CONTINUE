@@ -10,7 +10,7 @@ import android.os.Looper
 import java.util.concurrent.atomic.AtomicBoolean
 import rikka.shizuku.Shizuku
 
-/** App-side bridge for the independent V5 shoulder half. */
+/** App-side bridge for the shoulder uinput backend. */
 class ShoulderShizukuEngine(private val context: Context) {
     @Volatile private var remote: IShoulderInputService? = null
     @Volatile private var ready = false
@@ -33,10 +33,10 @@ class ShoulderShizukuEngine(private val context: Context) {
     )
         .processNameSuffix("pixeltrigger_shoulder")
         .daemon(true)
-        .tag("pixeltrigger-v5-shoulder-uinput")
-        // Version 1 can remain alive inside Shizuku after an APK update. Bumping
-        // this forces replacement with the repaired synchronous-result backend.
-        .version(2)
+        .tag("pixeltrigger-v6-shoulder-uinput-held")
+        // V6 adds explicit key DOWN/UP transactions. Force Shizuku to replace
+        // every older V5 UserService instance that only understands timed fireKey.
+        .version(3)
 
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
@@ -57,7 +57,11 @@ class ShoulderShizukuEngine(private val context: Context) {
                 return
             }
             val rc = runCatching { backend.initBackend() }.getOrDefault(-999)
-            ready = rc == 0
+            if (rc == ShoulderInputUserService.RESULT_OK) {
+                // A reconnect must never inherit a stuck key from a lost client.
+                runCatching { backend.releaseAll() }
+            }
+            ready = rc == ShoulderInputUserService.RESULT_OK
             status = runCatching { backend.status }.getOrDefault("init rc=$rc")
         }
 
@@ -113,30 +117,59 @@ class ShoulderShizukuEngine(private val context: Context) {
     /** durationMs=0 means the proven 70 ms physical-style press. */
     fun fireL(durationMs: Int): Boolean = fire(ShoulderInputUserService.KEY_F8, durationMs)
 
+    /** V6: keep the physical-style R source DOWN until releaseR(). */
+    fun pressR(): Boolean = press(ShoulderInputUserService.KEY_F7)
+
+    /** V6: keep the physical-style L source DOWN until releaseL(). */
+    fun pressL(): Boolean = press(ShoulderInputUserService.KEY_F8)
+
+    fun releaseR(): Boolean = release(ShoulderInputUserService.KEY_F7)
+
+    fun releaseL(): Boolean = release(ShoulderInputUserService.KEY_F8)
+
     private fun fire(key: Int, durationMs: Int): Boolean {
-        val backend = remote ?: run {
+        val backend = connectedBackend("FIRE") ?: return false
+        return callBackend("FIRE") { backend.fireKey(key, durationMs) }
+    }
+
+    private fun press(key: Int): Boolean {
+        val backend = connectedBackend("DOWN") ?: return false
+        return callBackend("DOWN") { backend.pressKey(key) }
+    }
+
+    private fun release(key: Int): Boolean {
+        val backend = connectedBackend("UP") ?: return false
+        return callBackend("UP") { backend.releaseKeyNow(key) }
+    }
+
+    private fun connectedBackend(operation: String): IShoulderInputService? {
+        val backend = remote
+        if (backend == null) {
             ready = false
             lastFireResult = FIRE_NOT_CONNECTED
-            status = "Shoulder FIRE waiting for UserService reconnect"
+            status = "Shoulder $operation waiting for UserService reconnect"
             scheduleReconnect()
-            return false
         }
+        return backend
+    }
+
+    private inline fun callBackend(operation: String, block: () -> Int): Boolean {
         return try {
-            val rc = backend.fireKey(key, durationMs)
+            val rc = block()
             lastFireResult = rc
             if (rc == ShoulderInputUserService.RESULT_OK) {
                 ready = true
                 true
             } else {
                 ready = false
-                status = runCatching { backend.status }.getOrDefault("Shoulder FIRE failed rc=$rc")
+                status = runCatching { remote?.status }.getOrNull() ?: "Shoulder $operation failed rc=$rc"
                 false
             }
         } catch (failure: Throwable) {
             remote = null
             ready = false
             lastFireResult = FIRE_BINDER_ERROR
-            status = "Shoulder FIRE binder error: ${failure.message ?: failure.javaClass.simpleName}"
+            status = "Shoulder $operation binder error: ${failure.message ?: failure.javaClass.simpleName}"
             scheduleReconnect()
             false
         }

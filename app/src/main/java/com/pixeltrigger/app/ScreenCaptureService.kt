@@ -89,6 +89,10 @@ class ScreenCaptureService : Service() {
 
     private lateinit var manualTapPair: ManualNubiaPairController
     private lateinit var analogShoulder: AnalogShoulderController
+    private var analogBrakeView: SensorOverlayView? = null
+    private var analogBrakeParams: WindowManager.LayoutParams? = null
+    @Volatile private var analogBrakeEditing = false
+    @Volatile private var analogBrakeOpen = false
 
     private var menuButton: TextView? = null
     private var menuButtonParams: WindowManager.LayoutParams? = null
@@ -226,10 +230,31 @@ class ScreenCaptureService : Service() {
         }
 
     private fun processImage(image: Image) {
-        // Right half remains first so the independent shoulder half can never
-        // delay PixelProbe detection or its confirmed Nubia tap.
+        // V6 brake shares the immutable capture frame but owns no PixelProbe state.
+        processAnalogBrakeFrame(image)
+        // Right half remains independent so V6 gating cannot change PixelProbe behavior.
         processRightFrame(image)
         ShoulderCaptureService.dispatchSharedFrame(image, screenWidth, screenHeight)
+    }
+
+    private fun processAnalogBrakeFrame(image: Image) {
+        if (!::analogShoulder.isInitialized || !analogShoulder.brakeEnabled || analogBrakeEditing) return
+        if (screenWidth <= 0 || screenHeight <= 0) return
+        val crop = image.cropRect
+        if (crop.width() <= 0 || crop.height() <= 0) return
+        val lp = analogBrakeParams ?: return
+        val sample = sampleSensor(image, crop, lp) ?: return
+
+        // Exact same near-white definition used to arm the right-half 0.3 mm probes.
+        // White = NO FIRE (green). Any clear departure = FIRE allowed (red).
+        val open = !sample.isArmingWhite()
+        if (open == analogBrakeOpen) return
+        analogBrakeOpen = open
+        analogShoulder.setBrakeOpen(open)
+        mainHandler.post {
+            analogBrakeView?.setStatus(if (open) SensorStatus.FIRED else SensorStatus.ARMED)
+            menuStatusText?.text = combinedStatusText()
+        }
     }
 
     private fun processRightFrame(image: Image) {
@@ -415,6 +440,7 @@ class ScreenCaptureService : Service() {
         analogShoulder = AnalogShoulderController(this, windowManager, preferences)
         analogShoulder.create(screenWidth, screenHeight)
         analogShoulder.setInputEnabled(shoulderHalfEnabled)
+        createAnalogBrakeSensor()
 
         val buttonSize = dp(50)
         val button = TextView(this).apply {
@@ -438,6 +464,78 @@ class ScreenCaptureService : Service() {
         setConfigurationTouchability(false)
         applyGroupVisibility()
         updateButtonVisual()
+    }
+
+    private fun createAnalogBrakeSensor() {
+        if (analogBrakeView != null) return
+        val view = SensorOverlayView(this, sensorVisibleDiameter)
+        view.setStatus(SensorStatus.ARMED)
+        val saved = loadAnalogBrakePosition(
+            screenWidth / 2 + dp(120) - sensorTouchSize / 2,
+            screenHeight / 2 - sensorTouchSize / 2,
+        )
+        val lp = overlayParams(sensorTouchSize, sensorTouchSize).apply {
+            x = saved.x
+            y = saved.y
+            flags = baseOverlayFlags() or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+        }
+        clampCirclePosition(lp, sensorVisibleDiameter)
+        analogBrakeView = view
+        analogBrakeParams = lp
+        windowManager.addView(view, lp)
+        attachDrag(view, lp, sensorVisibleDiameter) { x, y -> saveAnalogBrakePosition(x, y) }
+        analogBrakeOpen = false
+        analogShoulder.setBrakeOpen(false)
+        applyAnalogBrakeVisibilityAndTouchability()
+    }
+
+    private fun beginAnalogBrakeEditing() {
+        if (!::analogShoulder.isInitialized || !analogShoulder.brakeEnabled) {
+            showMessage("فعّل مكابح المراقبة أولًا")
+            return
+        }
+        closeMenu()
+        analogBrakeEditing = true
+        analogBrakeOpen = false
+        analogShoulder.setBrakeOpen(false)
+        applyAnalogBrakeVisibilityAndTouchability()
+        updateButtonVisual()
+        showMessage("حرّك دائرة مكابح المراقبة ثم افتح القائمة واضغط حفظ المكبح")
+    }
+
+    private fun finishAnalogBrakeEditing() {
+        if (!analogBrakeEditing) return
+        analogBrakeEditing = false
+        analogBrakeParams?.let { saveAnalogBrakePosition(it.x, it.y) }
+        analogBrakeOpen = false
+        analogShoulder.setBrakeOpen(false)
+        analogBrakeView?.setStatus(SensorStatus.ARMED)
+        applyAnalogBrakeVisibilityAndTouchability()
+        updateButtonVisual()
+        showMessage("تم حفظ موضع مكابح المراقبة")
+    }
+
+    private fun toggleAnalogBrake() {
+        if (!::analogShoulder.isInitialized) return
+        if (analogBrakeEditing) finishAnalogBrakeEditing()
+        analogShoulder.toggleBrakeEnabled()
+        analogBrakeOpen = false
+        if (analogShoulder.brakeEnabled) {
+            analogShoulder.setBrakeOpen(false)
+            analogBrakeView?.setStatus(SensorStatus.ARMED)
+        }
+        applyAnalogBrakeVisibilityAndTouchability()
+        menuStatusText?.text = combinedStatusText()
+    }
+
+    private fun applyAnalogBrakeVisibilityAndTouchability() {
+        val view = analogBrakeView ?: return
+        val lp = analogBrakeParams ?: return
+        val enabled = ::analogShoulder.isInitialized && analogShoulder.brakeEnabled
+        view.visibility = if (enabled || analogBrakeEditing) View.VISIBLE else View.INVISIBLE
+        lp.flags = if (analogBrakeEditing) baseOverlayFlags()
+        else baseOverlayFlags() or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+        runCatching { windowManager.updateViewLayout(view, lp) }
     }
 
     private fun createGroupFiveExtraSensors() {
@@ -508,7 +606,8 @@ class ScreenCaptureService : Service() {
             if (
                 !circleEditMode &&
                 (!::manualTapPair.isInitialized || !manualTapPair.isEditing) &&
-                (!::analogShoulder.isInitialized || !analogShoulder.isEditing)
+                (!::analogShoulder.isInitialized || !analogShoulder.isEditing) &&
+                !analogBrakeEditing
             ) {
                 longPressTriggered = true
                 toggleAllEngines()
@@ -764,7 +863,7 @@ class ScreenCaptureService : Service() {
         val fill = when {
             circleEditMode ||
                 (::manualTapPair.isInitialized && manualTapPair.isEditing) ||
-                (::analogShoulder.isInitialized && analogShoulder.isEditing) -> Color.rgb(30, 165, 92)
+                (::analogShoulder.isInitialized && analogShoulder.isEditing) || analogBrakeEditing -> Color.rgb(30, 165, 92)
             everythingOff -> Color.rgb(95, 95, 104)
             !engineEnabled -> Color.rgb(122, 92, 55)
             tapEngine.capability != InputCapability.CONCURRENT_TOUCH_SAFE -> Color.rgb(165, 70, 190)
@@ -774,7 +873,7 @@ class ScreenCaptureService : Service() {
         button.text = when {
             circleEditMode ||
                 (::manualTapPair.isInitialized && manualTapPair.isEditing) ||
-                (::analogShoulder.isInitialized && analogShoulder.isEditing) -> "✓"
+                (::analogShoulder.isInitialized && analogShoulder.isEditing) || analogBrakeEditing -> "✓"
             everythingOff -> "OFF"
             else -> "${activeGroup + 1}"
         }
@@ -1012,9 +1111,39 @@ class ScreenCaptureService : Service() {
                 ),
                 matchWrap(dp(44)),
             )
+            val fastBrakeRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            fastBrakeRow.addView(
+                microCard(analogShoulder.fastLabel) {
+                    analogShoulder.toggleFast()
+                    closeMenu()
+                },
+                LinearLayout.LayoutParams(0, dp(40), 1f),
+            )
+            fastBrakeRow.addView(
+                microCard(analogShoulder.brakeLabel) {
+                    toggleAnalogBrake()
+                    closeMenu()
+                },
+                LinearLayout.LayoutParams(0, dp(40), 1f),
+            )
+            content.addView(fastBrakeRow, matchWrap(dp(42)))
+
+            val brakeEditRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            brakeEditRow.addView(
+                microCard("✥ تعديل المكبح") { beginAnalogBrakeEditing() },
+                LinearLayout.LayoutParams(0, dp(38), 1f),
+            )
+            brakeEditRow.addView(
+                microCard("✓ حفظ المكبح") {
+                    finishAnalogBrakeEditing()
+                    closeMenu()
+                },
+                LinearLayout.LayoutParams(0, dp(38), 1f),
+            )
+            content.addView(brakeEditRow, matchWrap(dp(40)))
             content.addView(
                 TextView(this).apply {
-                    text = "بلوغ حد السحب قبل انتهاء WAIT = R فورًا • انتهاء WAIT أولًا = L • الإفلات قبل القرار = لا شيء"
+                    text = "R قبل WAIT = فوري • FAST يسمح L→R بعد WAIT • الأخضر يمنع/يوقف R/L • الأحمر يسمح ويعيد التشغيل ما دام الإصبع ضاغطًا"
                     textSize = 10.5f
                     gravity = Gravity.CENTER
                     setTextColor(Color.rgb(55, 75, 86))
@@ -1190,7 +1319,12 @@ class ScreenCaptureService : Service() {
         } else {
             "MANUAL OFF"
         }
-        val analog = if (::analogShoulder.isInitialized) "V6 R→drag / L→wait" else "V6 --"
+        val analog = if (::analogShoulder.isInitialized) {
+            val brake = if (analogShoulder.brakeEnabled) {
+                if (analogBrakeOpen) "BRAKE FIRE" else "BRAKE NO-FIRE"
+            } else "BRAKE OFF"
+            "V6 ${if (analogShoulder.fastEnabled) "FAST" else "LOCK"} $brake"
+        } else "V6 --"
         return "PixelProbe: ${engineStatusText()}  •  R/L: ${ShoulderCaptureService.statusSummary()}  •  $manual  •  $analog"
     }
 
@@ -1312,6 +1446,7 @@ class ScreenCaptureService : Service() {
         val groupFiveVisible = circlesVisible && activeGroup == GROUP_FIVE_INDEX
         groupFiveExtraViews.forEach { it?.visibility = if (groupFiveVisible) View.VISIBLE else View.INVISIBLE }
         targetView?.visibility = if (circlesVisible) View.VISIBLE else View.INVISIBLE
+        applyAnalogBrakeVisibilityAndTouchability()
     }
 
     private fun refreshDisplayGeometry() {
@@ -1337,6 +1472,7 @@ class ScreenCaptureService : Service() {
         restoreRightOverlayPositionsForCurrentProfile()
         if (::manualTapPair.isInitialized) manualTapPair.updateBounds(screenWidth, screenHeight)
         if (::analogShoulder.isInitialized) analogShoulder.updateBounds(screenWidth, screenHeight)
+        restoreAnalogBrakePositionForCurrentProfile()
         menuButtonParams?.let { lp ->
             clampPosition(lp)
             menuButton?.let { runCatching { windowManager.updateViewLayout(it, lp) } }
@@ -1416,6 +1552,48 @@ class ScreenCaptureService : Service() {
         val x = metrics.xdpi.takeIf { it.isFinite() && it in 100f..1000f } ?: metrics.densityDpi.toFloat()
         val y = metrics.ydpi.takeIf { it.isFinite() && it in 100f..1000f } ?: metrics.densityDpi.toFloat()
         return (mm * ((x + y) / 2f) / 25.4f).roundToInt()
+    }
+
+    private fun loadAnalogBrakePosition(
+        fallbackX: Int,
+        fallbackY: Int,
+    ): OrientationPositionStore.Position = positionStore.load(
+        keyPrefix = ANALOG_BRAKE_POSITION_KEY,
+        screenWidth = screenWidth,
+        screenHeight = screenHeight,
+        overlayWidth = sensorTouchSize,
+        overlayHeight = sensorTouchSize,
+        fallbackX = fallbackX,
+        fallbackY = fallbackY,
+    )
+
+    private fun saveAnalogBrakePosition(x: Int, y: Int) {
+        positionStore.save(
+            keyPrefix = ANALOG_BRAKE_POSITION_KEY,
+            x = x,
+            y = y,
+            screenWidth = screenWidth,
+            screenHeight = screenHeight,
+            overlayWidth = sensorTouchSize,
+            overlayHeight = sensorTouchSize,
+        )
+    }
+
+    private fun restoreAnalogBrakePositionForCurrentProfile() {
+        val lp = analogBrakeParams ?: return
+        val view = analogBrakeView ?: return
+        val saved = loadAnalogBrakePosition(
+            screenWidth / 2 + dp(120) - sensorTouchSize / 2,
+            screenHeight / 2 - sensorTouchSize / 2,
+        )
+        lp.x = saved.x
+        lp.y = saved.y
+        clampCirclePosition(lp, sensorVisibleDiameter)
+        runCatching { windowManager.updateViewLayout(view, lp) }
+        analogBrakeOpen = false
+        if (::analogShoulder.isInitialized && analogShoulder.brakeEnabled) analogShoulder.setBrakeOpen(false)
+        view.setStatus(SensorStatus.ARMED)
+        applyAnalogBrakeVisibilityAndTouchability()
     }
 
     private fun rightSensorPositionKey(group: Int, slot: Int): String =
@@ -1703,6 +1881,7 @@ class ScreenCaptureService : Service() {
         sensorViews.forEach { it?.let { view -> runCatching { windowManager.removeView(view) } } }
         groupFiveExtraViews.forEach { it?.let { view -> runCatching { windowManager.removeView(view) } } }
         targetView?.let { runCatching { windowManager.removeView(it) } }
+        analogBrakeView?.let { runCatching { windowManager.removeView(it) } }
         if (::manualTapPair.isInitialized) manualTapPair.destroy()
         if (::analogShoulder.isInitialized) analogShoulder.destroy()
         menuButton?.let { runCatching { windowManager.removeView(it) } }
@@ -1753,5 +1932,6 @@ class ScreenCaptureService : Service() {
         private const val KEY_WHITE_REARM = "white_rearm_enabled"
         private const val KEY_REARM_DELAY_ENABLED = "rearm_delay_enabled"
         private const val RIGHT_TARGET_POSITION_KEY = "right.target"
+        private const val ANALOG_BRAKE_POSITION_KEY = "v6.analog.brake"
     }
 }

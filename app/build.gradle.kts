@@ -11,8 +11,8 @@ android {
         applicationId = "com.pixeltrigger.app"
         minSdk = 29
         targetSdk = 35
-        versionCode = 63
-        versionName = "6.1-intent-routing"
+        versionCode = 64
+        versionName = "6.2-fast-monitor-brake"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 

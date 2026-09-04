@@ -46,6 +46,12 @@ class AnalogShoulderController(
         prefs.getInt(KEY_DECISION_DELAY_MS, DEFAULT_DECISION_DELAY_MS),
     )
 
+    var fastEnabled: Boolean = prefs.getBoolean(KEY_FAST_ENABLED, false)
+        private set
+    var brakeEnabled: Boolean = prefs.getBoolean(KEY_BRAKE_ENABLED, true)
+        private set
+    private var brakeOpen = false
+
     var isVisible: Boolean = prefs.getBoolean(KEY_VISIBLE, true)
         private set
     var isEditing: Boolean = false
@@ -59,6 +65,7 @@ class AnalogShoulderController(
 
     private var decision = Decision.IDLE
     private var pressBinding = Binding.L
+    private var outputDown = false
     private var fingerOffsetX = 0f
     private var fingerOffsetY = 0f
     private var pendingDecisionRunnable: Runnable? = null
@@ -66,6 +73,8 @@ class AnalogShoulderController(
     val baseSizeLabel: String get() = formatSize(baseSizeHundredths)
     val knobSizeLabel: String get() = formatSize(knobSizeHundredths)
     val decisionDelayLabel: String get() = "$decisionDelayMs ms"
+    val fastLabel: String get() = if (fastEnabled) "FAST ON" else "FAST OFF"
+    val brakeLabel: String get() = if (brakeEnabled) "مكابح المراقبة ON" else "مكابح المراقبة OFF"
 
     fun create(width: Int, height: Int) {
         if (baseView != null) return
@@ -180,6 +189,25 @@ class AnalogShoulderController(
     fun decreaseDecisionDelay() = setDecisionDelay(decisionDelayMs - DECISION_DELAY_STEP_MS)
     fun increaseDecisionDelay() = setDecisionDelay(decisionDelayMs + DECISION_DELAY_STEP_MS)
 
+    fun toggleFast() {
+        fastEnabled = !fastEnabled
+        prefs.edit().putBoolean(KEY_FAST_ENABLED, fastEnabled).apply()
+    }
+
+    fun toggleBrakeEnabled() {
+        brakeEnabled = !brakeEnabled
+        prefs.edit().putBoolean(KEY_BRAKE_ENABLED, brakeEnabled).apply()
+        // Enabling the brake is fail-closed until a fresh captured frame proves FIRE.
+        if (brakeEnabled) brakeOpen = false
+        reconcileOutput()
+    }
+
+    fun setBrakeOpen(open: Boolean) {
+        if (brakeOpen == open) return
+        brakeOpen = open
+        reconcileOutput()
+    }
+
     private fun setDecisionDelay(value: Int) {
         val normalized = normalizeDecisionDelay(value)
         if (normalized == decisionDelayMs) return
@@ -253,6 +281,8 @@ class AnalogShoulderController(
                         )
                         if (decision == Decision.PENDING && reachedRLimit) {
                             activateDecision(Binding.R)
+                        } else if (decision == Decision.L_ACTIVE && fastEnabled && reachedRLimit) {
+                            upgradeLToR()
                         }
                     }
                     true
@@ -294,18 +324,44 @@ class AnalogShoulderController(
         cancelPendingDecision()
         pressBinding = side
         decision = if (side == Binding.R) Decision.R_ACTIVE else Decision.L_ACTIVE
-        beginShoulderPress(side)
+        reconcileOutput()
         knobView?.alpha = 0.78f
         rebuildKnobVisual()
     }
 
-    private fun finishContact() {
-        when (decision) {
-            Decision.PENDING -> cancelPendingDecision()
-            Decision.R_ACTIVE, Decision.L_ACTIVE -> endCurrentPress()
-            Decision.IDLE -> Unit
+    /** FAST is one-way for a contact: a selected L may upgrade to R, never back. */
+    private fun upgradeLToR() {
+        if (!fastEnabled || decision != Decision.L_ACTIVE) return
+        if (outputDown) endCurrentPress()
+        pressBinding = Binding.R
+        decision = Decision.R_ACTIVE
+        reconcileOutput()
+        knobView?.alpha = 0.78f
+        rebuildKnobVisual()
+    }
+
+    /**
+     * Intent and physical output are deliberately separate. The brake may suspend
+     * an already-selected R/L with UP, then resume the SAME intent with DOWN when
+     * the monitored pixel leaves white, as long as the finger contact still lives.
+     */
+    private fun reconcileOutput() {
+        val selected = decision == Decision.R_ACTIVE || decision == Decision.L_ACTIVE
+        val gateOpen = !brakeEnabled || brakeOpen
+        val shouldBeDown = selected && gateOpen && inputEnabled && isVisible && !isEditing
+
+        if (shouldBeDown && !outputDown) {
+            outputDown = beginShoulderPress(pressBinding)
+        } else if (!shouldBeDown && outputDown) {
+            endCurrentPress()
         }
+    }
+
+    private fun finishContact() {
+        if (decision == Decision.PENDING) cancelPendingDecision()
+        if (outputDown) endCurrentPress()
         decision = Decision.IDLE
+        outputDown = false
     }
 
     private fun beginShoulderPress(side: Binding): Boolean = when (side) {
@@ -314,20 +370,20 @@ class AnalogShoulderController(
     }
 
     private fun endCurrentPress() {
-        if (decision != Decision.R_ACTIVE && decision != Decision.L_ACTIVE) return
         when (pressBinding) {
             Binding.R -> ShoulderCaptureService.endFingerHoldR()
             Binding.L -> ShoulderCaptureService.endFingerHoldL()
         }
+        outputDown = false
     }
 
     private fun forceRelease() {
         cancelPendingDecision()
-        if (decision == Decision.R_ACTIVE || decision == Decision.L_ACTIVE) {
-            endCurrentPress()
-        }
+        if (outputDown) endCurrentPress()
+        // Ownership guards in ShoulderCaptureService make this a safe stuck-key fallback.
         ShoulderCaptureService.endAnyFingerHold()
         decision = Decision.IDLE
+        outputDown = false
         knobView?.alpha = 1f
         centerKnob()
         rebuildKnobVisual()
@@ -551,6 +607,8 @@ class AnalogShoulderController(
         private const val KEY_BASE_SIZE = "v6_analog_base_size_hundredths_cm"
         private const val KEY_KNOB_SIZE = "v6_analog_knob_size_hundredths_cm"
         private const val KEY_DECISION_DELAY_MS = "v6_analog_decision_delay_ms"
+        private const val KEY_FAST_ENABLED = "v6_analog_fast_enabled"
+        private const val KEY_BRAKE_ENABLED = "v6_analog_brake_enabled"
         private const val KEY_VISIBLE = "v6_analog_visible"
         private const val POSITION_KEY = "v6.analog.base"
 

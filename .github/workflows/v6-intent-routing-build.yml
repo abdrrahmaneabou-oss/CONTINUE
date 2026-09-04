@@ -1,0 +1,570 @@
+name: V6 intent routing build
+
+on:
+  push:
+    branches: [ v6-intent-routing ]
+
+permissions:
+  contents: write
+
+jobs:
+  patch-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK, NDK and CMake
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;27.2.12479018" "cmake;3.22.1"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Apply intent-routing source update
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(text, old, new, label):
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{label}: expected exactly 1 match, got {count}")
+              return text.replace(old, new, 1)
+
+          controller_path = Path('app/src/main/java/com/pixeltrigger/app/AnalogShoulderController.kt')
+          text = controller_path.read_text()
+
+          text = replace_once(text,
+          ''' * R/L itself is not a screen injection. The knob drives the existing shoulder
+           * uinput backend with a real key DOWN on finger-down and key UP on finger-up.
+          ''',
+          ''' * R/L itself is not a screen injection. Each contact starts PENDING: reaching
+           * the knob travel limit chooses R immediately; otherwise the user-selected delay
+           * chooses L. The chosen shoulder remains DOWN until that same finger is released.
+          ''', 'doc')
+
+          text = replace_once(text,
+          '''    private enum class Binding { R, L }
+
+              private val positionStore = OrientationPositionStore(prefs)
+
+              private var screenWidth = 1
+              private var screenHeight = 1
+              private var baseSizeHundredths = normalizeSize(prefs.getInt(KEY_BASE_SIZE, DEFAULT_BASE_SIZE))
+              private var knobSizeHundredths = normalizeSize(prefs.getInt(KEY_KNOB_SIZE, DEFAULT_KNOB_SIZE))
+              private var binding = runCatching {
+                  Binding.valueOf(prefs.getString(KEY_BINDING, Binding.R.name) ?: Binding.R.name)
+              }.getOrDefault(Binding.R)
+          ''',
+          '''    private enum class Binding { R, L }
+              private enum class Decision { IDLE, PENDING, R_ACTIVE, L_ACTIVE }
+
+              private val positionStore = OrientationPositionStore(prefs)
+
+              private var screenWidth = 1
+              private var screenHeight = 1
+              private var baseSizeHundredths = normalizeSize(prefs.getInt(KEY_BASE_SIZE, DEFAULT_BASE_SIZE))
+              private var knobSizeHundredths = normalizeSize(prefs.getInt(KEY_KNOB_SIZE, DEFAULT_KNOB_SIZE))
+              private var decisionDelayMs = normalizeDecisionDelay(
+                  prefs.getInt(KEY_DECISION_DELAY_MS, DEFAULT_DECISION_DELAY_MS),
+              )
+          ''', 'state-header')
+
+          text = replace_once(text,
+          '''    private var pressActive = false
+              private var pressBinding = Binding.R
+              private var downAtMs = 0L
+              private var downRawX = 0f
+              private var downRawY = 0f
+              private var movedDuringPress = false
+              private var fingerOffsetX = 0f
+              private var fingerOffsetY = 0f
+
+              private var quickTapCount = 0
+              private var lastQuickTapUpMs = 0L
+
+              val bindingLabel: String get() = binding.name
+              val baseSizeLabel: String get() = formatSize(baseSizeHundredths)
+              val knobSizeLabel: String get() = formatSize(knobSizeHundredths)
+          ''',
+          '''    private var decision = Decision.IDLE
+              private var pressActive = false
+              private var pressBinding = Binding.L
+              private var fingerOffsetX = 0f
+              private var fingerOffsetY = 0f
+              private var pendingDecisionRunnable: Runnable? = null
+
+              val baseSizeLabel: String get() = formatSize(baseSizeHundredths)
+              val knobSizeLabel: String get() = formatSize(knobSizeHundredths)
+              val decisionDelayLabel: String get() = "$decisionDelayMs ms"
+          ''', 'fields')
+
+          text = replace_once(text,
+          '''    fun beginEditing() {
+                  forceRelease()
+                  quickTapCount = 0
+                  isEditing = true
+          ''',
+          '''    fun beginEditing() {
+                  forceRelease()
+                  isEditing = true
+          ''', 'begin-edit')
+
+          text = replace_once(text,
+          '''    fun decreaseBaseSize() = setBaseSize(stepSize(baseSizeHundredths, -1))
+              fun increaseBaseSize() = setBaseSize(stepSize(baseSizeHundredths, +1))
+              fun decreaseKnobSize() = setKnobSize(stepSize(knobSizeHundredths, -1))
+              fun increaseKnobSize() = setKnobSize(stepSize(knobSizeHundredths, +1))
+
+              private fun setBaseSize(value: Int) {
+          ''',
+          '''    fun decreaseBaseSize() = setBaseSize(stepSize(baseSizeHundredths, -1))
+              fun increaseBaseSize() = setBaseSize(stepSize(baseSizeHundredths, +1))
+              fun decreaseKnobSize() = setKnobSize(stepSize(knobSizeHundredths, -1))
+              fun increaseKnobSize() = setKnobSize(stepSize(knobSizeHundredths, +1))
+              fun decreaseDecisionDelay() = setDecisionDelay(decisionDelayMs - DECISION_DELAY_STEP_MS)
+              fun increaseDecisionDelay() = setDecisionDelay(decisionDelayMs + DECISION_DELAY_STEP_MS)
+
+              private fun setDecisionDelay(value: Int) {
+                  val normalized = normalizeDecisionDelay(value)
+                  if (normalized == decisionDelayMs) return
+                  forceRelease()
+                  decisionDelayMs = normalized
+                  prefs.edit().putInt(KEY_DECISION_DELAY_MS, normalized).apply()
+              }
+
+              private fun setBaseSize(value: Int) {
+          ''', 'delay-controls')
+
+          old_touch = '''    private fun attachKnobTouch(view: View) {
+                  view.setOnTouchListener { _, event ->
+                      when (event.actionMasked) {
+                          MotionEvent.ACTION_DOWN -> {
+                              if (!isVisible || isEditing || !inputEnabled) return@setOnTouchListener true
+                              quickTapCount = if (
+                                  lastQuickTapUpMs > 0L && event.eventTime - lastQuickTapUpMs <= TRIPLE_TAP_GAP_MS
+                              ) quickTapCount else 0
+
+                              val center = knobCenter()
+                              fingerOffsetX = event.rawX - center.first
+                              fingerOffsetY = event.rawY - center.second
+                              downRawX = event.rawX
+                              downRawY = event.rawY
+                              downAtMs = event.eventTime
+                              movedDuringPress = false
+                              pressBinding = binding
+                              pressActive = beginShoulderPress(pressBinding)
+                              view.alpha = 0.78f
+                              true
+                          }
+
+                          MotionEvent.ACTION_MOVE -> {
+                              if (!isEditing && inputEnabled && isVisible) {
+                                  val dxFromDown = event.rawX - downRawX
+                                  val dyFromDown = event.rawY - downRawY
+                                  if (dxFromDown * dxFromDown + dyFromDown * dyFromDown > dragSlopPxSquared()) {
+                                      movedDuringPress = true
+                                      quickTapCount = 0
+                                  }
+                                  moveKnobToward(
+                                      event.rawX - fingerOffsetX,
+                                      event.rawY - fingerOffsetY,
+                                  )
+                              }
+                              true
+                          }
+
+                          MotionEvent.ACTION_UP -> {
+                              endCurrentPress()
+                              view.alpha = 1f
+                              centerKnob()
+                              registerQuickTapIfEligible(event.eventTime)
+                              true
+                          }
+
+                          MotionEvent.ACTION_CANCEL -> {
+                              endCurrentPress()
+                              view.alpha = 1f
+                              quickTapCount = 0
+                              centerKnob()
+                              true
+                          }
+
+                          else -> true
+                      }
+                  }
+              }
+
+              private fun registerQuickTapIfEligible(upTimeMs: Long) {
+                  val duration = upTimeMs - downAtMs
+                  if (movedDuringPress || duration !in 0..TRIPLE_TAP_MAX_HOLD_MS) {
+                      quickTapCount = 0
+                      lastQuickTapUpMs = 0L
+                      return
+                  }
+                  quickTapCount = if (
+                      lastQuickTapUpMs > 0L && upTimeMs - lastQuickTapUpMs <= TRIPLE_TAP_GAP_MS
+                  ) quickTapCount + 1 else 1
+                  lastQuickTapUpMs = upTimeMs
+
+                  if (quickTapCount >= 3) {
+                      binding = if (binding == Binding.R) Binding.L else Binding.R
+                      prefs.edit().putString(KEY_BINDING, binding.name).apply()
+                      quickTapCount = 0
+                      lastQuickTapUpMs = 0L
+                      rebuildKnobVisual()
+                  }
+              }
+          '''
+          new_touch = '''    private fun attachKnobTouch(view: View) {
+                  view.setOnTouchListener { _, event ->
+                      when (event.actionMasked) {
+                          MotionEvent.ACTION_DOWN -> {
+                              if (!isVisible || isEditing || !inputEnabled) return@setOnTouchListener true
+                              forceRelease()
+                              val center = knobCenter()
+                              fingerOffsetX = event.rawX - center.first
+                              fingerOffsetY = event.rawY - center.second
+                              decision = Decision.PENDING
+                              view.alpha = 0.90f
+                              rebuildKnobVisual()
+                              schedulePendingL(view)
+                              true
+                          }
+
+                          MotionEvent.ACTION_MOVE -> {
+                              if (!isEditing && inputEnabled && isVisible) {
+                                  val reachedRLimit = moveKnobToward(
+                                      event.rawX - fingerOffsetX,
+                                      event.rawY - fingerOffsetY,
+                                  )
+                                  if (decision == Decision.PENDING && reachedRLimit) {
+                                      activateDecision(Binding.R)
+                                  }
+                              }
+                              true
+                          }
+
+                          MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                              finishContact()
+                              view.alpha = 1f
+                              centerKnob()
+                              rebuildKnobVisual()
+                              true
+                          }
+
+                          else -> true
+                      }
+                  }
+              }
+
+              private fun schedulePendingL(view: View) {
+                  cancelPendingDecision()
+                  val runnable = Runnable {
+                      pendingDecisionRunnable = null
+                      if (decision == Decision.PENDING && isVisible && !isEditing && inputEnabled) {
+                          activateDecision(Binding.L)
+                      }
+                  }
+                  pendingDecisionRunnable = runnable
+                  view.postDelayed(runnable, decisionDelayMs.toLong())
+              }
+
+              private fun cancelPendingDecision() {
+                  val runnable = pendingDecisionRunnable ?: return
+                  knobView?.removeCallbacks(runnable)
+                  pendingDecisionRunnable = null
+              }
+
+              private fun activateDecision(side: Binding) {
+                  if (decision != Decision.PENDING) return
+                  cancelPendingDecision()
+                  pressBinding = side
+                  decision = if (side == Binding.R) Decision.R_ACTIVE else Decision.L_ACTIVE
+                  pressActive = beginShoulderPress(side)
+                  knobView?.alpha = 0.78f
+                  rebuildKnobVisual()
+              }
+
+              private fun finishContact() {
+                  when (decision) {
+                      Decision.PENDING -> cancelPendingDecision()
+                      Decision.R_ACTIVE, Decision.L_ACTIVE -> endCurrentPress()
+                      Decision.IDLE -> Unit
+                  }
+                  decision = Decision.IDLE
+                  pressActive = false
+              }
+          '''
+          text = replace_once(text, old_touch, new_touch, 'touch-state-machine')
+
+          old_release = '''    private fun endCurrentPress() {
+                  if (!pressActive) {
+                      // Release is intentionally still attempted: if the DOWN Binder call
+                      // succeeded but its result was lost, UP must remain fail-safe.
+                      when (pressBinding) {
+                          Binding.R -> ShoulderCaptureService.endFingerHoldR()
+                          Binding.L -> ShoulderCaptureService.endFingerHoldL()
+                      }
+                      return
+                  }
+                  when (pressBinding) {
+                      Binding.R -> ShoulderCaptureService.endFingerHoldR()
+                      Binding.L -> ShoulderCaptureService.endFingerHoldL()
+                  }
+                  pressActive = false
+              }
+
+              private fun forceRelease() {
+                  when (pressBinding) {
+                      Binding.R -> ShoulderCaptureService.endFingerHoldR()
+                      Binding.L -> ShoulderCaptureService.endFingerHoldL()
+                  }
+                  ShoulderCaptureService.endAnyFingerHold()
+                  pressActive = false
+                  knobView?.alpha = 1f
+                  centerKnob()
+              }
+
+              private fun moveKnobToward(desiredCenterX: Float, desiredCenterY: Float) {
+                  val lp = knobParams ?: return
+                  val view = knobView ?: return
+          '''
+          new_release = '''    private fun endCurrentPress() {
+                  if (decision != Decision.R_ACTIVE && decision != Decision.L_ACTIVE) return
+                  // Even if the DOWN result was lost, the ownership guard in
+                  // ShoulderCaptureService makes this immediate UP safe.
+                  when (pressBinding) {
+                      Binding.R -> ShoulderCaptureService.endFingerHoldR()
+                      Binding.L -> ShoulderCaptureService.endFingerHoldL()
+                  }
+                  pressActive = false
+              }
+
+              private fun forceRelease() {
+                  cancelPendingDecision()
+                  if (decision == Decision.R_ACTIVE || decision == Decision.L_ACTIVE) {
+                      endCurrentPress()
+                  }
+                  ShoulderCaptureService.endAnyFingerHold()
+                  decision = Decision.IDLE
+                  pressActive = false
+                  knobView?.alpha = 1f
+                  centerKnob()
+                  rebuildKnobVisual()
+              }
+
+              private fun moveKnobToward(desiredCenterX: Float, desiredCenterY: Float): Boolean {
+                  val lp = knobParams ?: return false
+                  val view = knobView ?: return false
+          '''
+          text = replace_once(text, old_release, new_release, 'release-and-move-signature')
+
+          text = replace_once(text,
+          '''        lp.x = (centerX - diameter / 2f).roundToInt()
+                  lp.y = (centerY - diameter / 2f).roundToInt()
+                  runCatching { windowManager.updateViewLayout(view, lp) }
+              }
+
+              private fun centerKnob(updateWindow: Boolean = true) {
+          ''',
+          '''        lp.x = (centerX - diameter / 2f).roundToInt()
+                  lp.y = (centerY - diameter / 2f).roundToInt()
+                  runCatching { windowManager.updateViewLayout(view, lp) }
+
+                  // R is selected only when the ACTUAL knob center reaches the
+                  // permitted radius from the base center. Screen-edge clamping
+                  // therefore cannot produce a false R decision.
+                  val actualDx = centerX - baseCenter.first
+                  val actualDy = centerY - baseCenter.second
+                  val actualDistance = hypot(actualDx.toDouble(), actualDy.toDouble()).toFloat()
+                  return actualDistance + 0.5f >= maxOffset
+              }
+
+              private fun centerKnob(updateWindow: Boolean = true) {
+          ''', 'actual-r-threshold')
+
+          text = replace_once(text,
+          '''    private fun rebuildKnobVisual() {
+                  knobView?.apply {
+                      text = binding.name
+                      textSize = max(10f, knobDiameterPx() / context.resources.displayMetrics.scaledDensity * 0.30f)
+                      background = android.graphics.drawable.GradientDrawable().apply {
+                          shape = android.graphics.drawable.GradientDrawable.OVAL
+                          setColor(if (binding == Binding.R) Color.rgb(116, 63, 205) else Color.rgb(30, 139, 184))
+                          setStroke(max(dp(1), knobDiameterPx() / 22), Color.argb(230, 245, 245, 255))
+                      }
+                  }
+              }
+          ''',
+          '''    private fun rebuildKnobVisual() {
+                  knobView?.apply {
+                      text = when (decision) {
+                          Decision.IDLE -> "R/L"
+                          Decision.PENDING -> "…"
+                          Decision.R_ACTIVE -> "R"
+                          Decision.L_ACTIVE -> "L"
+                      }
+                      textSize = max(9f, knobDiameterPx() / context.resources.displayMetrics.scaledDensity * 0.26f)
+                      background = android.graphics.drawable.GradientDrawable().apply {
+                          shape = android.graphics.drawable.GradientDrawable.OVAL
+                          setColor(
+                              when (decision) {
+                                  Decision.R_ACTIVE -> Color.rgb(116, 63, 205)
+                                  Decision.L_ACTIVE -> Color.rgb(30, 139, 184)
+                                  Decision.PENDING -> Color.rgb(92, 102, 128)
+                                  Decision.IDLE -> Color.rgb(67, 112, 190)
+                              },
+                          )
+                          setStroke(max(dp(1), knobDiameterPx() / 22), Color.argb(230, 245, 245, 255))
+                      }
+                  }
+              }
+          ''', 'visual')
+
+          text = replace_once(text,
+          '''    private fun dragSlopPxSquared(): Float {
+                  val slop = dp(10).toFloat()
+                  return slop * slop
+              }
+
+          ''', '', 'remove-drag-slop')
+
+          text = replace_once(text,
+          '''        private const val KEY_BASE_SIZE = "v6_analog_base_size_hundredths_cm"
+                  private const val KEY_KNOB_SIZE = "v6_analog_knob_size_hundredths_cm"
+                  private const val KEY_BINDING = "v6_analog_binding"
+                  private const val KEY_VISIBLE = "v6_analog_visible"
+                  private const val POSITION_KEY = "v6.analog.base"
+
+                  private const val DEFAULT_BASE_SIZE = 155
+                  private const val DEFAULT_KNOB_SIZE = 125
+                  private const val TRIPLE_TAP_MAX_HOLD_MS = 220L
+                  private const val TRIPLE_TAP_GAP_MS = 300L
+          ''',
+          '''        private const val KEY_BASE_SIZE = "v6_analog_base_size_hundredths_cm"
+                  private const val KEY_KNOB_SIZE = "v6_analog_knob_size_hundredths_cm"
+                  private const val KEY_DECISION_DELAY_MS = "v6_analog_decision_delay_ms"
+                  private const val KEY_VISIBLE = "v6_analog_visible"
+                  private const val POSITION_KEY = "v6.analog.base"
+
+                  private const val DEFAULT_BASE_SIZE = 155
+                  private const val DEFAULT_KNOB_SIZE = 125
+                  private const val DEFAULT_DECISION_DELAY_MS = 150
+                  private const val DECISION_DELAY_MIN_MS = 50
+                  private const val DECISION_DELAY_MAX_MS = 500
+                  private const val DECISION_DELAY_STEP_MS = 50
+          ''', 'constants')
+
+          text = replace_once(text,
+          '''        private fun normalizeSize(value: Int): Int = SIZE_STEPS.minByOrNull { kotlin.math.abs(it - value) } ?: 25
+
+                  private fun stepSize(current: Int, delta: Int): Int {
+          ''',
+          '''        private fun normalizeSize(value: Int): Int = SIZE_STEPS.minByOrNull { kotlin.math.abs(it - value) } ?: 25
+
+                  private fun normalizeDecisionDelay(value: Int): Int {
+                      val clamped = value.coerceIn(DECISION_DELAY_MIN_MS, DECISION_DELAY_MAX_MS)
+                      return ((clamped + DECISION_DELAY_STEP_MS / 2) / DECISION_DELAY_STEP_MS * DECISION_DELAY_STEP_MS)
+                          .coerceIn(DECISION_DELAY_MIN_MS, DECISION_DELAY_MAX_MS)
+                  }
+
+                  private fun stepSize(current: Int, delta: Int): Int {
+          ''', 'delay-normalize')
+
+          if 'TRIPLE_TAP' in text or 'quickTap' in text or 'KEY_BINDING' in text or 'bindingLabel' in text:
+              raise SystemExit('obsolete triple-tap/binding symbols remain in AnalogShoulderController')
+          controller_path.write_text(text)
+
+          screen_path = Path('app/src/main/java/com/pixeltrigger/app/ScreenCaptureService.kt')
+          screen = screen_path.read_text()
+          screen = replace_once(screen,
+          '''                sectionLabel("V6  •  ANALOG SHOULDER  •  ${analogShoulder.bindingLabel}", Color.rgb(38, 118, 150)),
+          ''',
+          '''                sectionLabel("V6  •  ANALOG SHOULDER  •  R بالسحب / L بالانتظار", Color.rgb(38, 118, 150)),
+          ''', 'menu-header')
+
+          knob_row = '''            content.addView(
+                          analogSizeRow(
+                              "KNOB",
+                              { analogShoulder.knobSizeLabel },
+                              { analogShoulder.decreaseKnobSize() },
+                              { analogShoulder.increaseKnobSize() },
+                          ),
+                          matchWrap(dp(44)),
+                      )
+          '''
+          wait_row = knob_row + '''            content.addView(
+                          analogSizeRow(
+                              "WAIT",
+                              { analogShoulder.decisionDelayLabel },
+                              { analogShoulder.decreaseDecisionDelay() },
+                              { analogShoulder.increaseDecisionDelay() },
+                          ),
+                          matchWrap(dp(44)),
+                      )
+          '''
+          screen = replace_once(screen, knob_row, wait_row, 'menu-wait-row')
+          screen = replace_once(screen,
+          '''                    text = "3 نقرات سريعة تبدّل R/L • الضغط والسحب يبقيان الكتف DOWN • الإفلات = UP"
+          ''',
+          '''                    text = "بلوغ حد السحب قبل انتهاء WAIT = R فورًا • انتهاء WAIT أولًا = L • الإفلات قبل القرار = لا شيء"
+          ''', 'menu-help')
+          if 'analogShoulder.bindingLabel' in screen or '3 نقرات سريعة تبدّل R/L' in screen:
+              raise SystemExit('obsolete analog menu binding/triple-tap text remains')
+          screen_path.write_text(screen)
+
+          gradle_path = Path('app/build.gradle.kts')
+          gradle = gradle_path.read_text()
+          gradle = replace_once(gradle,
+          '''        versionCode = 62
+                  versionName = "6.0-analog-shoulder"
+          ''',
+          '''        versionCode = 63
+                  versionName = "6.1-intent-routing"
+          ''', 'version')
+          gradle_path.write_text(gradle)
+          PY
+
+      - name: Verify removed behavior
+        shell: bash
+        run: |
+          set -euo pipefail
+          ! grep -R "TRIPLE_TAP\|quickTapCount\|bindingLabel" app/src/main/java/com/pixeltrigger/app/AnalogShoulderController.kt
+          grep -q 'versionCode = 63' app/build.gradle.kts
+          grep -q 'versionName = "6.1-intent-routing"' app/build.gradle.kts
+          grep -q 'KEY_DECISION_DELAY_MS' app/src/main/java/com/pixeltrigger/app/AnalogShoulderController.kt
+          grep -q 'Decision.PENDING' app/src/main/java/com/pixeltrigger/app/AnalogShoulderController.kt
+          grep -q 'actualDistance + 0.5f >= maxOffset' app/src/main/java/com/pixeltrigger/app/AnalogShoulderController.kt
+
+      - name: Test and build
+        shell: bash
+        run: |
+          set -o pipefail
+          gradle --no-daemon --rerun-tasks clean :app:testDebugUnitTest :app:assembleDebug --stacktrace
+
+      - name: Commit clean source
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f .github/workflows/v6-intent-routing-build.yml
+          git config user.name 'CHATGPT'
+          git config user.email 'abdrrahmaneabou@gmail.com'
+          git add app/build.gradle.kts \
+                  app/src/main/java/com/pixeltrigger/app/AnalogShoulderController.kt \
+                  app/src/main/java/com/pixeltrigger/app/ScreenCaptureService.kt \
+                  .github/workflows/v6-intent-routing-build.yml
+          git commit -m 'feat: route V6 analog intent to R drag or delayed L'
+          git push origin HEAD:v6-intent-routing

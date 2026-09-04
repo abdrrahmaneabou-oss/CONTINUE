@@ -6,7 +6,7 @@ import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Shizuku UserService backend for the V5 shoulder half.
+ * Shizuku UserService backend for the shoulder half.
  * Runs only under ADB shell UID 2000 and owns the persistent uinput devices.
  */
 public final class ShoulderInputUserService extends IShoulderInputService.Stub {
@@ -58,21 +58,31 @@ public final class ShoulderInputUserService extends IShoulderInputService.Stub {
         return status + " | native=" + nativeStatus();
     }
 
-    @Override
-    public int fireKey(int linuxKeyCode, int durationMs) {
-        try {
-            Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_DISPLAY);
-        } catch (Throwable ignored) {
-            // Best effort only; FIRE must continue even if the ROM rejects priority changes.
-        }
+    private int validateKey(int linuxKeyCode) {
         if (Process.myUid() != SHELL_UID) {
-            status = "Rejected fire: uid=" + Process.myUid();
+            status = "Rejected key operation: uid=" + Process.myUid();
             return ERROR_BAD_UID;
         }
         if (linuxKeyCode != KEY_F7 && linuxKeyCode != KEY_F8) {
             status = "Unsupported key=" + linuxKeyCode;
             return ERROR_BAD_KEY;
         }
+        return RESULT_OK;
+    }
+
+    private void boostPriorityBestEffort() {
+        try {
+            Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_DISPLAY);
+        } catch (Throwable ignored) {
+            // Best effort only.
+        }
+    }
+
+    @Override
+    public int fireKey(int linuxKeyCode, int durationMs) {
+        boostPriorityBestEffort();
+        final int validation = validateKey(linuxKeyCode);
+        if (validation != RESULT_OK) return validation;
 
         final int requested = durationMs <= 0 ? FLASH_MS : Math.max(1000, Math.min(durationMs, 5000));
         final int generation;
@@ -89,8 +99,6 @@ public final class ShoulderInputUserService extends IShoulderInputService.Stub {
 
             int rc = nativeKeyDown(linuxKeyCode);
             if (rc != RESULT_OK) {
-                // A stale uinput fd used to make every later FIRE fail forever.
-                // Recreate both devices once and retry the same FIRE transaction.
                 invalidateAllPressesLocked();
                 final int resetRc = nativeResetBackend();
                 if (resetRc == RESULT_OK) rc = nativeKeyDown(linuxKeyCode);
@@ -113,6 +121,72 @@ public final class ShoulderInputUserService extends IShoulderInputService.Stub {
             return ERROR_RELEASE_SCHEDULER;
         }
         return RESULT_OK;
+    }
+
+    /**
+     * V6 continuous press. If a timed press is already down, keep the same
+     * physical contact but advance its generation so the old scheduled UP can
+     * no longer release the user's held finger press.
+     */
+    @Override
+    public int pressKey(int linuxKeyCode) {
+        boostPriorityBestEffort();
+        final int validation = validateKey(linuxKeyCode);
+        if (validation != RESULT_OK) return validation;
+
+        synchronized (lock) {
+            nextGeneration(linuxKeyCode);
+            if (isDown(linuxKeyCode)) {
+                status = "HELD key=" + linuxKeyCode + " (continued existing DOWN)";
+                return RESULT_OK;
+            }
+
+            int rc = nativeKeyDown(linuxKeyCode);
+            if (rc != RESULT_OK) {
+                invalidateAllPressesLocked();
+                final int resetRc = nativeResetBackend();
+                if (resetRc == RESULT_OK) rc = nativeKeyDown(linuxKeyCode);
+                else rc = resetRc;
+            }
+            if (rc != RESULT_OK) {
+                status = nativeStatus();
+                return rc;
+            }
+            setDown(linuxKeyCode, true);
+            status = "HELD DOWN key=" + linuxKeyCode;
+            return RESULT_OK;
+        }
+    }
+
+    /** Immediate UP used when the user's finger leaves the V6 knob. */
+    @Override
+    public int releaseKeyNow(int linuxKeyCode) {
+        boostPriorityBestEffort();
+        final int validation = validateKey(linuxKeyCode);
+        if (validation != RESULT_OK) return validation;
+
+        synchronized (lock) {
+            // Invalidate any old timed release first.
+            nextGeneration(linuxKeyCode);
+            if (!isDown(linuxKeyCode)) {
+                status = "UP key=" + linuxKeyCode + " (already released)";
+                return RESULT_OK;
+            }
+
+            final int rc = nativeKeyUp(linuxKeyCode);
+            setDown(linuxKeyCode, false);
+            if (rc == RESULT_OK) {
+                status = "UP key=" + linuxKeyCode;
+                return RESULT_OK;
+            }
+
+            // If UP itself failed, recreating the uinput devices is the safest
+            // way to guarantee no logical shoulder remains stuck down.
+            invalidateAllPressesLocked();
+            final int resetRc = nativeResetBackend();
+            status = resetRc == RESULT_OK ? "UP recovered by backend reset key=" + linuxKeyCode : nativeStatus();
+            return resetRc;
+        }
     }
 
     private void releaseKey(int linuxKeyCode, int generation) {

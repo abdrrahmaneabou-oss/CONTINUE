@@ -229,11 +229,18 @@ class ShoulderCaptureService : Service() {
     /** V6 finger UP/CANCEL. No duration is guessed; UP happens at this call. */
     private fun endFingerHoldSide(requestedSide: Side?): Boolean {
         if (!::shoulderInput.isInitialized) return false
-        val target = requestedSide ?: fingerHeldSide
+        val held = fingerHeldSide
+        val target = requestedSide ?: held
         if (target == null) {
             fingerReservedSide = null
             return true
         }
+
+        // V6 must never release a timed/manual shoulder press it does not own.
+        // Only the side currently reserved/held by the finger-driven controller
+        // is eligible for this immediate UP.
+        if (held != target && fingerReservedSide != target) return true
+
         val released = if (target == Side.R) shoulderInput.releaseR() else shoulderInput.releaseL()
         if (fingerHeldSide == target || requestedSide == null) fingerHeldSide = null
         if (fingerReservedSide == target || requestedSide == null) fingerReservedSide = null

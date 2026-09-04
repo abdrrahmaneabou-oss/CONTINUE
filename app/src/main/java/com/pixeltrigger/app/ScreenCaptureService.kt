@@ -250,10 +250,14 @@ class ScreenCaptureService : Service() {
         val open = !sample.isArmingWhite()
         if (open == analogBrakeOpen) return
         analogBrakeOpen = open
-        analogShoulder.setBrakeOpen(open)
+        // Touch intent, FAST promotion, and brake-driven DOWN/UP are serialized
+        // on the main thread so a capture callback can never race a finger MOVE/UP.
         mainHandler.post {
-            analogBrakeView?.setStatus(if (open) SensorStatus.FIRED else SensorStatus.ARMED)
-            menuStatusText?.text = combinedStatusText()
+            if (::analogShoulder.isInitialized && analogShoulder.brakeEnabled && analogBrakeOpen == open) {
+                analogShoulder.setBrakeOpen(open)
+                analogBrakeView?.setStatus(if (open) SensorStatus.FIRED else SensorStatus.ARMED)
+                menuStatusText?.text = combinedStatusText()
+            }
         }
     }
 

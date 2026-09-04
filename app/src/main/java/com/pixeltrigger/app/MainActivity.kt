@@ -92,7 +92,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         root.addView(TextView(this).apply {
-            text = "PixelTrigger V5"
+            text = "PixelTrigger V6"
             textSize = 25f
             setTextColor(Color.WHITE)
             gravity = Gravity.CENTER
@@ -110,7 +110,7 @@ class MainActivity : AppCompatActivity() {
         root.addView(requirements, matchWrap(dp(116)))
 
         val start = Button(this).apply {
-            text = "بدء PixelTrigger V5"
+            text = "بدء PixelTrigger V6"
             textSize = 17f
             isAllCaps = false
             setOnClickListener { beginAllMonitoring() }
@@ -149,7 +149,7 @@ class MainActivity : AppCompatActivity() {
         addView(body("المحرك الحالي محفوظ: المجموعات، التسليح، إعادة التسليح، دوائر 0.3mm ومسار Shizuku السريع للضغطة."))
         addView(innerCard().apply {
             addView(title("واجهة اللعب", Color.WHITE))
-            addView(body("بعد البدء يظهر زر عائم واحد P5. منه تتحكم في PixelProbe وR/L معًا. النافذة نفسها قابلة للسحب والحفظ."))
+            addView(body("بعد البدء يظهر زر عائم واحد P6. منه تتحكم في PixelProbe وR/L معًا. النافذة نفسها قابلة للسحب والحفظ."))
         })
     }
 
@@ -288,7 +288,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun sendShoulderAction(action: String) {
         runCatching { startService(Intent(this, ShoulderCaptureService::class.java).apply { this.action = action }) }
-            .onFailure { Toast.makeText(this, "ابدأ PixelTrigger V5 أولًا", Toast.LENGTH_SHORT).show() }
+            .onFailure { Toast.makeText(this, "ابدأ PixelTrigger V6 أولًا", Toast.LENGTH_SHORT).show() }
     }
 
     private fun requestShizukuPermission() {

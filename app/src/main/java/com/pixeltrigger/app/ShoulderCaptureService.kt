@@ -50,6 +50,7 @@ class ShoulderCaptureService : Service() {
     @Volatile private var editSide: Side? = null
     @Volatile private var engineEnabled = true
     private var lastInputReady = false
+    private var fingerHeldSide: Side? = null
     private var wakeLock: PowerManager.WakeLock? = null
 
     override fun onCreate() {
@@ -150,7 +151,7 @@ class ShoulderCaptureService : Service() {
         // A visible/enabled manual shoulder circle owns its selected side exclusively.
         // This prevents the macro's own screen changes from feeding back into the
         // automatic detector and recursively firing the same R/L action.
-        if (manualReservedSide == side) return
+        if (manualReservedSide == side || fingerReservedSide == side) return
 
         val lp = params ?: return
         val sample = sample(image, crop, lp) ?: return
@@ -200,6 +201,44 @@ class ShoulderCaptureService : Service() {
         } else {
             shoulderInput.fireL(pressDurationMs(Side.L))
         }
+    }
+
+    /** V6 finger DOWN: reserve that detector side and keep F7/F8 physically held. */
+    private fun beginFingerHoldSide(side: Side): Boolean {
+        if (!engineEnabled || !::shoulderInput.isInitialized) return false
+        if (!shoulderInput.isReady()) {
+            shoulderInput.connect()
+            return false
+        }
+
+        val previous = fingerHeldSide
+        if (previous != null && previous != side) endFingerHoldSide(previous)
+
+        fingerReservedSide = side
+        fingerHeldSide = side
+        onManualReservationChanged()
+        val pressed = if (side == Side.R) shoulderInput.pressR() else shoulderInput.pressL()
+        if (!pressed) {
+            fingerHeldSide = null
+            if (fingerReservedSide == side) fingerReservedSide = null
+            onManualReservationChanged()
+        }
+        return pressed
+    }
+
+    /** V6 finger UP/CANCEL. No duration is guessed; UP happens at this call. */
+    private fun endFingerHoldSide(requestedSide: Side?): Boolean {
+        if (!::shoulderInput.isInitialized) return false
+        val target = requestedSide ?: fingerHeldSide
+        if (target == null) {
+            fingerReservedSide = null
+            return true
+        }
+        val released = if (target == Side.R) shoulderInput.releaseR() else shoulderInput.releaseL()
+        if (fingerHeldSide == target || requestedSide == null) fingerHeldSide = null
+        if (fingerReservedSide == target || requestedSide == null) fingerReservedSide = null
+        onManualReservationChanged()
+        return released
     }
 
     private fun createOverlays() {
@@ -383,7 +422,10 @@ class ShoulderCaptureService : Service() {
     private fun setEngineEnabled(enabled: Boolean) {
         engineEnabled = enabled
         prefs.edit().putBoolean(KEY_ENGINE_ENABLED, enabled).apply()
-        if (!enabled) shoulderInput.releaseAll()
+        if (!enabled) {
+            endFingerHoldSide(null)
+            shoulderInput.releaseAll()
+        }
         rDetector.resetForSensorMove()
         lDetector.resetForSensorMove()
         refreshStatusViews()
@@ -405,7 +447,7 @@ class ShoulderCaptureService : Service() {
 
     private fun refreshSideStatus(side: Side, ready: Boolean) {
         val status = when {
-            manualReservedSide == side -> SensorStatus.OFF
+            manualReservedSide == side || fingerReservedSide == side -> SensorStatus.OFF
             !engineEnabled -> SensorStatus.OFF
             !ready -> SensorStatus.INPUT_NOT_READY
             detector(side).state == DetectionEngine.State.ARMED -> SensorStatus.ARMED
@@ -423,8 +465,9 @@ class ShoulderCaptureService : Service() {
         val r = if (!prefs.getBoolean("shoulder_r_hold", false)) "Flash" else "${prefs.getInt("shoulder_r_seconds", 1).coerceIn(1, 5)}s"
         val l = if (!prefs.getBoolean("shoulder_l_hold", false)) "Flash" else "${prefs.getInt("shoulder_l_seconds", 1).coerceIn(1, 5)}s"
         val state = if (engineEnabled) "ON" else "OFF"
-        val reserved = manualReservedSide?.name?.let { " • Manual $it" } ?: ""
-        return "R $r  •  L $l  •  $state$reserved"
+        val manual = manualReservedSide?.name?.let { " • Manual $it" } ?: ""
+        val finger = fingerReservedSide?.name?.let { " • V6 hold $it" } ?: ""
+        return "R $r  •  L $l  •  $state$manual$finger"
     }
 
     private fun overlayParams(width: Int, height: Int) = WindowManager.LayoutParams(
@@ -462,7 +505,7 @@ class ShoulderCaptureService : Service() {
 
     private fun buildNotification() = NotificationCompat.Builder(this, CHANNEL_ID)
         .setSmallIcon(android.R.drawable.ic_media_play)
-        .setContentTitle("PixelTrigger V5 — R/L")
+        .setContentTitle("PixelTrigger V6 — R/L")
         .setContentText("1 R + 1 L • PixelProbe detector path")
         .setOngoing(true)
         .build()
@@ -472,6 +515,7 @@ class ShoulderCaptureService : Service() {
         rView?.let { runCatching { windowManager.removeView(it) } }
         lView?.let { runCatching { windowManager.removeView(it) } }
         if (::shoulderInput.isInitialized) {
+            endFingerHoldSide(null)
             shoulderInput.releaseAll()
             shoulderInput.disconnect()
         }
@@ -482,6 +526,7 @@ class ShoulderCaptureService : Service() {
     companion object {
         @Volatile private var activeInstance: ShoulderCaptureService? = null
         @Volatile private var manualReservedSide: Side? = null
+        @Volatile private var fingerReservedSide: Side? = null
 
         fun dispatchSharedFrame(image: Image, screenWidth: Int, screenHeight: Int) {
             activeInstance?.consumeSharedFrame(image, screenWidth, screenHeight)
@@ -491,6 +536,16 @@ class ShoulderCaptureService : Service() {
         fun fireConfiguredR(): Boolean = activeInstance?.fireConfiguredSide(Side.R) ?: false
 
         fun fireConfiguredL(): Boolean = activeInstance?.fireConfiguredSide(Side.L) ?: false
+
+        fun beginFingerHoldR(): Boolean = activeInstance?.beginFingerHoldSide(Side.R) ?: false
+
+        fun beginFingerHoldL(): Boolean = activeInstance?.beginFingerHoldSide(Side.L) ?: false
+
+        fun endFingerHoldR(): Boolean = activeInstance?.endFingerHoldSide(Side.R) ?: false
+
+        fun endFingerHoldL(): Boolean = activeInstance?.endFingerHoldSide(Side.L) ?: false
+
+        fun endAnyFingerHold(): Boolean = activeInstance?.endFingerHoldSide(null) ?: false
 
         fun reserveManualR() = setManualReservation(Side.R)
 

@@ -88,6 +88,7 @@ class ScreenCaptureService : Service() {
     private var targetVisibleDiameter = 1
 
     private lateinit var manualTapPair: ManualNubiaPairController
+    private lateinit var analogShoulder: AnalogShoulderController
 
     private var menuButton: TextView? = null
     private var menuButtonParams: WindowManager.LayoutParams? = null
@@ -411,6 +412,10 @@ class ScreenCaptureService : Service() {
         manualTapPair = ManualNubiaPairController(this, windowManager, preferences)
         manualTapPair.create(screenWidth, screenHeight)
 
+        analogShoulder = AnalogShoulderController(this, windowManager, preferences)
+        analogShoulder.create(screenWidth, screenHeight)
+        analogShoulder.setInputEnabled(shoulderHalfEnabled)
+
         val buttonSize = dp(50)
         val button = TextView(this).apply {
             text = "${activeGroup + 1}"
@@ -500,7 +505,11 @@ class ScreenCaptureService : Service() {
     private fun attachFloatingButtonGesture(view: View, params: WindowManager.LayoutParams) {
         var longPressTriggered = false
         val holdRunnable = Runnable {
-            if (!circleEditMode && (!::manualTapPair.isInitialized || !manualTapPair.isEditing)) {
+            if (
+                !circleEditMode &&
+                (!::manualTapPair.isInitialized || !manualTapPair.isEditing) &&
+                (!::analogShoulder.isInitialized || !analogShoulder.isEditing)
+            ) {
                 longPressTriggered = true
                 toggleAllEngines()
             }
@@ -700,6 +709,7 @@ class ScreenCaptureService : Service() {
                 putExtra(ShoulderCaptureService.EXTRA_ENABLED, enabled)
             })
         }
+        if (::analogShoulder.isInitialized) analogShoulder.setInputEnabled(enabled)
         updateButtonVisual()
         menuStatusText?.text = combinedStatusText()
     }
@@ -723,7 +733,7 @@ class ScreenCaptureService : Service() {
             setLeftEngineEnabled(false)
             if (::manualTapPair.isInitialized) manualTapPair.setEnabled(false)
             updateButtonVisual()
-            showMessage("PixelTrigger V5 OFF • الحالة محفوظة")
+            showMessage("PixelTrigger V6 OFF • الحالة محفوظة")
             return
         }
 
@@ -752,7 +762,9 @@ class ScreenCaptureService : Service() {
         val manualOff = !::manualTapPair.isInitialized || !manualTapPair.isEnabled
         val everythingOff = !engineEnabled && !shoulderHalfEnabled && manualOff
         val fill = when {
-            circleEditMode || (::manualTapPair.isInitialized && manualTapPair.isEditing) -> Color.rgb(30, 165, 92)
+            circleEditMode ||
+                (::manualTapPair.isInitialized && manualTapPair.isEditing) ||
+                (::analogShoulder.isInitialized && analogShoulder.isEditing) -> Color.rgb(30, 165, 92)
             everythingOff -> Color.rgb(95, 95, 104)
             !engineEnabled -> Color.rgb(122, 92, 55)
             tapEngine.capability != InputCapability.CONCURRENT_TOUCH_SAFE -> Color.rgb(165, 70, 190)
@@ -760,7 +772,9 @@ class ScreenCaptureService : Service() {
             else -> Color.rgb(79, 52, 185)
         }
         button.text = when {
-            circleEditMode || (::manualTapPair.isInitialized && manualTapPair.isEditing) -> "✓"
+            circleEditMode ||
+                (::manualTapPair.isInitialized && manualTapPair.isEditing) ||
+                (::analogShoulder.isInitialized && analogShoulder.isEditing) -> "✓"
             everythingOff -> "OFF"
             else -> "${activeGroup + 1}"
         }
@@ -783,7 +797,7 @@ class ScreenCaptureService : Service() {
             background = roundedBackground(Color.rgb(247, 247, 251), Color.rgb(146, 142, 167), 18f)
         }
         val header = TextView(this).apply {
-            text = "PixelTrigger V5  •  Group ${activeGroup + 1}"
+            text = "PixelTrigger V6  •  Group ${activeGroup + 1}"
             textSize = 16f
             setTextColor(Color.rgb(24, 23, 32))
             gravity = Gravity.CENTER
@@ -939,6 +953,68 @@ class ScreenCaptureService : Service() {
             content.addView(bindRow, matchWrap(dp(36)))
         }
 
+        if (::analogShoulder.isInitialized) {
+            content.addView(
+                sectionLabel("V6  •  ANALOG SHOULDER  •  ${analogShoulder.bindingLabel}", Color.rgb(38, 118, 150)),
+                matchWrap(),
+            )
+            val analogActions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            analogActions.addView(
+                microCard("✥ تعديل القاعدة") {
+                    closeMenu()
+                    analogShoulder.beginEditing()
+                    updateButtonVisual()
+                    showMessage("حرّك قاعدة V6 ثم افتح القائمة واضغط حفظ")
+                },
+                LinearLayout.LayoutParams(0, dp(40), 1f),
+            )
+            analogActions.addView(
+                microCard("✓ حفظ") {
+                    analogShoulder.finishEditing()
+                    updateButtonVisual()
+                    closeMenu()
+                    showMessage("تم حفظ قاعدة V6 وقفل موضعها")
+                },
+                LinearLayout.LayoutParams(0, dp(40), 1f),
+            )
+            analogActions.addView(
+                microCard(if (analogShoulder.isVisible) "◉ إخفاء" else "○ إظهار") {
+                    analogShoulder.toggleVisible()
+                    closeMenu()
+                },
+                LinearLayout.LayoutParams(0, dp(40), 1f),
+            )
+            content.addView(analogActions, matchWrap(dp(42)))
+            content.addView(
+                analogSizeRow(
+                    "BASE",
+                    { analogShoulder.baseSizeLabel },
+                    { analogShoulder.decreaseBaseSize() },
+                    { analogShoulder.increaseBaseSize() },
+                ),
+                matchWrap(dp(44)),
+            )
+            content.addView(
+                analogSizeRow(
+                    "KNOB",
+                    { analogShoulder.knobSizeLabel },
+                    { analogShoulder.decreaseKnobSize() },
+                    { analogShoulder.increaseKnobSize() },
+                ),
+                matchWrap(dp(44)),
+            )
+            content.addView(
+                TextView(this).apply {
+                    text = "3 نقرات سريعة تبدّل R/L • الضغط والسحب يبقيان الكتف DOWN • الإفلات = UP"
+                    textSize = 10.5f
+                    gravity = Gravity.CENTER
+                    setTextColor(Color.rgb(55, 75, 86))
+                    setPadding(dp(5), dp(3), dp(5), dp(6))
+                },
+                matchWrap(),
+            )
+        }
+
         content.addView(sectionLabel("SHOULDER  •  R / L", Color.rgb(150, 49, 76)), matchWrap())
         content.addView(shoulderControlCard(), matchWrap())
 
@@ -1038,6 +1114,30 @@ class ScreenCaptureService : Service() {
         return card
     }
 
+    private fun analogSizeRow(
+        label: String,
+        value: () -> String,
+        decrease: () -> Unit,
+        increase: () -> Unit,
+    ): View {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val current = TextView(this).apply {
+            textSize = 12f
+            gravity = Gravity.CENTER
+            setTextColor(Color.rgb(42, 65, 78))
+            background = roundedBackground(Color.rgb(232, 246, 250), Color.rgb(87, 151, 174), 10f)
+        }
+        fun refresh() { current.text = "$label  ${value()}" }
+        row.addView(microCard("−") { decrease(); refresh() }, LinearLayout.LayoutParams(dp(58), dp(40)))
+        row.addView(current, LinearLayout.LayoutParams(0, dp(40), 1f))
+        row.addView(microCard("+") { increase(); refresh() }, LinearLayout.LayoutParams(dp(58), dp(40)))
+        refresh()
+        return row
+    }
+
     private fun sectionLabel(value: String, color: Int) = TextView(this).apply {
         text = value
         textSize = 12f
@@ -1081,7 +1181,8 @@ class ScreenCaptureService : Service() {
         } else {
             "MANUAL OFF"
         }
-        return "PixelProbe: ${engineStatusText()}  •  R/L: ${ShoulderCaptureService.statusSummary()}  •  $manual"
+        val analog = if (::analogShoulder.isInitialized) "V6 ${analogShoulder.bindingLabel}" else "V6 --"
+        return "PixelProbe: ${engineStatusText()}  •  R/L: ${ShoulderCaptureService.statusSummary()}  •  $manual  •  $analog"
     }
 
     private fun engineStatusText(): String {
@@ -1226,6 +1327,7 @@ class ScreenCaptureService : Service() {
 
         restoreRightOverlayPositionsForCurrentProfile()
         if (::manualTapPair.isInitialized) manualTapPair.updateBounds(screenWidth, screenHeight)
+        if (::analogShoulder.isInitialized) analogShoulder.updateBounds(screenWidth, screenHeight)
         menuButtonParams?.let { lp ->
             clampPosition(lp)
             menuButton?.let { runCatching { windowManager.updateViewLayout(it, lp) } }
@@ -1560,14 +1662,14 @@ class ScreenCaptureService : Service() {
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= 26) {
             (getSystemService(NOTIFICATION_SERVICE) as NotificationManager).createNotificationChannel(
-                NotificationChannel(CHANNEL_ID, "PixelTrigger V5", NotificationManager.IMPORTANCE_LOW),
+                NotificationChannel(CHANNEL_ID, "PixelTrigger V6", NotificationManager.IMPORTANCE_LOW),
             )
         }
     }
 
     private fun buildNotification(): Notification = NotificationCompat.Builder(this, CHANNEL_ID)
         .setSmallIcon(android.R.drawable.ic_menu_view)
-        .setContentTitle("PixelTrigger V5")
+        .setContentTitle("PixelTrigger V6")
         .setContentText("4×1 + 1×3 PixelProbe + 1R + 1L")
         .setOngoing(true)
         .build()
@@ -1593,6 +1695,7 @@ class ScreenCaptureService : Service() {
         groupFiveExtraViews.forEach { it?.let { view -> runCatching { windowManager.removeView(view) } } }
         targetView?.let { runCatching { windowManager.removeView(it) } }
         if (::manualTapPair.isInitialized) manualTapPair.destroy()
+        if (::analogShoulder.isInitialized) analogShoulder.destroy()
         menuButton?.let { runCatching { windowManager.removeView(it) } }
         virtualDisplay?.release()
         imageReader?.close()

@@ -773,46 +773,87 @@ class ScreenCaptureService : Service() {
     }
 
     private fun showMenu() {
-        if (menuPanel != null) return
-        tapEngine.refreshCapability()
-        setConfigurationTouchability(false)
+    if (menuPanel != null) return
+    tapEngine.refreshCapability()
+    setConfigurationTouchability(false)
 
-        val root = LinearLayout(this).apply {
+    val root = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        setPadding(dp(10), dp(8), dp(10), dp(10))
+        background = roundedBackground(Color.rgb(247, 247, 251), Color.rgb(146, 142, 167), 18f)
+    }
+    val header = TextView(this).apply {
+        text = "PixelTrigger V6  •  Group ${activeGroup + 1}"
+        textSize = 16f
+        setTextColor(Color.rgb(24, 23, 32))
+        gravity = Gravity.CENTER
+        setPadding(dp(8), dp(9), dp(8), dp(9))
+        background = roundedBackground(Color.rgb(228, 224, 247), Color.rgb(170, 159, 224), 12f)
+    }
+    root.addView(header, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(46)))
+
+    val content = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        setPadding(0, dp(6), 0, 0)
+    }
+    menuStatusText = TextView(this).apply {
+        text = combinedStatusText()
+        textSize = 12f
+        setTextColor(Color.rgb(42, 42, 52))
+        gravity = Gravity.CENTER
+        setPadding(dp(6), dp(4), dp(6), dp(6))
+    }
+    content.addView(menuStatusText, matchWrap())
+
+    val sectionShortcuts = mutableListOf<TextView>()
+    val sectionBodies = mutableListOf<LinearLayout>()
+    fun addAccordionSection(title: String, accent: Int, buildBody: (LinearLayout) -> Unit) {
+        val body = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(10), dp(8), dp(10), dp(10))
-            background = roundedBackground(Color.rgb(247, 247, 251), Color.rgb(146, 142, 167), 18f)
+            visibility = View.GONE
+            setPadding(dp(4), dp(3), dp(4), dp(6))
         }
-        val header = TextView(this).apply {
-            text = "PixelTrigger V5  •  Group ${activeGroup + 1}"
-            textSize = 16f
-            setTextColor(Color.rgb(24, 23, 32))
+        buildBody(body)
+        val shortcut = TextView(this).apply {
+            text = "▸ $title"
+            tag = title
+            textSize = 14f
             gravity = Gravity.CENTER
-            setPadding(dp(8), dp(9), dp(8), dp(9))
-            background = roundedBackground(Color.rgb(228, 224, 247), Color.rgb(170, 159, 224), 12f)
+            setTextColor(accent)
+            setPadding(dp(8), dp(8), dp(8), dp(8))
+            background = roundedBackground(Color.rgb(244, 242, 250), accent, 12f)
+            isClickable = true
+            isFocusable = true
         }
-        root.addView(header, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(46)))
+        shortcut.setOnClickListener {
+            val opening = body.visibility != View.VISIBLE
+            var i = 0
+            while (i < sectionBodies.size) {
+                sectionBodies[i].visibility = View.GONE
+                val other = sectionShortcuts[i]
+                other.text = "▸ ${other.tag as String}"
+                i++
+            }
+            if (opening) {
+                body.visibility = View.VISIBLE
+                shortcut.text = "▾ $title"
+            }
+        }
+        sectionShortcuts.add(shortcut)
+        sectionBodies.add(body)
+        content.addView(shortcut, matchWrap(dp(48)))
+        content.addView(body, matchWrap())
+    }
 
-        val content = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(0, dp(6), 0, 0)
-        }
-        menuStatusText = TextView(this).apply {
-            text = combinedStatusText()
-            textSize = 12f
-            setTextColor(Color.rgb(42, 42, 52))
-            gravity = Gravity.CENTER
-            setPadding(dp(6), dp(4), dp(6), dp(6))
-        }
-        content.addView(menuStatusText, matchWrap())
-
-        content.addView(sectionLabel("PIXELPROBE  •  GROUP ${activeGroup + 1}/$GROUP_COUNT", Color.rgb(83, 58, 170)), matchWrap())
-        val rightRow1 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        rightRow1.addView(smallCard("↺ المنتصف") { resetMonitorCircleToCenter() }, LinearLayout.LayoutParams(0, dp(58), 1f))
-        rightRow1.addView(smallCard("✥ تعديل الموضع") { beginCirclePositionEditing() }, LinearLayout.LayoutParams(0, dp(58), 1f))
-        content.addView(rightRow1, matchWrap(dp(60)))
+    addAccordionSection("النصف الأيمن", Color.rgb(83, 58, 170)) { body ->
+        body.addView(sectionLabel("PIXELPROBE  •  GROUP ${activeGroup + 1}/$GROUP_COUNT", Color.rgb(83, 58, 170)), matchWrap())
+        val positionRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        positionRow.addView(smallCard("↺ المنتصف") { resetMonitorCircleToCenter() }, LinearLayout.LayoutParams(0, dp(58), 1f))
+        positionRow.addView(smallCard("✥ تعديل الموضع") { beginCirclePositionEditing() }, LinearLayout.LayoutParams(0, dp(58), 1f))
+        body.addView(positionRow, matchWrap(dp(60)))
 
         val monitorPlural = activeGroup == GROUP_FIVE_INDEX
-        content.addView(
+        body.addView(
             smallCard(
                 if (circlesVisible) {
                     if (monitorPlural) "◉ إخفاء الدوائر" else "◉ إخفاء الدائرة"
@@ -827,10 +868,7 @@ class ScreenCaptureService : Service() {
         )
 
         if (activeGroup == GROUP_FIVE_INDEX) {
-            content.addView(
-                sectionLabel("GROUP 5  •  ضغطات كل FIRE  •  فارق 50ms", Color.rgb(83, 58, 170)),
-                matchWrap(),
-            )
+            body.addView(sectionLabel("GROUP 5  •  ضغطات كل FIRE  •  فارق 50ms", Color.rgb(83, 58, 170)), matchWrap())
             val burstRow = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
@@ -844,199 +882,229 @@ class ScreenCaptureService : Service() {
             fun refreshBurstValue() {
                 burstValue.text = "×$groupFiveTapsPerFire لكل FIRE"
             }
-            burstRow.addView(
-                smallCard("−") {
-                    setGroupFiveTapsPerFire(groupFiveTapsPerFire - 1)
-                    refreshBurstValue()
-                },
-                LinearLayout.LayoutParams(dp(64), dp(46)),
-            )
+            burstRow.addView(smallCard("−") {
+                setGroupFiveTapsPerFire(groupFiveTapsPerFire - 1)
+                refreshBurstValue()
+            }, LinearLayout.LayoutParams(dp(64), dp(46)))
             burstRow.addView(burstValue, LinearLayout.LayoutParams(0, dp(46), 1f))
-            burstRow.addView(
-                smallCard("+") {
-                    setGroupFiveTapsPerFire(groupFiveTapsPerFire + 1)
-                    refreshBurstValue()
-                },
-                LinearLayout.LayoutParams(dp(64), dp(46)),
-            )
+            burstRow.addView(smallCard("+") {
+                setGroupFiveTapsPerFire(groupFiveTapsPerFire + 1)
+                refreshBurstValue()
+            }, LinearLayout.LayoutParams(dp(64), dp(46)))
             refreshBurstValue()
-            content.addView(burstRow, matchWrap(dp(48)))
+            body.addView(burstRow, matchWrap(dp(48)))
         }
 
-        content.addView(sectionLabel("تشغيل النصفين", Color.rgb(55, 105, 125)), matchWrap())
-        val halvesRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        halvesRow.addView(
-            smallCard(if (shoulderHalfEnabled) "■ إيقاف النصف الأيسر" else "▶ تشغيل النصف الأيسر") {
-                toggleLeftEngine()
-                closeMenu()
-            },
-            LinearLayout.LayoutParams(0, dp(58), 1f),
-        )
-        halvesRow.addView(
-            smallCard(if (engineEnabled) "■ إيقاف النصف الأيمن" else "▶ تشغيل النصف الأيمن") {
-                toggleRightEngine()
-                closeMenu()
-            },
-            LinearLayout.LayoutParams(0, dp(58), 1f),
-        )
-        content.addView(halvesRow, matchWrap(dp(60)))
+        val rightToggle = smallCard(if (engineEnabled) "■ إيقاف النصف الأيمن" else "▶ تشغيل النصف الأيمن") {}
+        rightToggle.setOnClickListener {
+            toggleRightEngine()
+            rightToggle.text = if (engineEnabled) "■ إيقاف النصف الأيمن" else "▶ تشغيل النصف الأيمن"
+            menuStatusText?.text = combinedStatusText()
+        }
+        body.addView(rightToggle, matchWrap(dp(54)))
+    }
 
-        if (::manualTapPair.isInitialized) {
-            content.addView(sectionLabel("MANUAL  •  SHOULDER R/L", Color.rgb(155, 95, 25)), matchWrap())
+    addAccordionSection("النصف الأيسر", Color.rgb(150, 49, 76)) { body ->
+        val leftToggle = smallCard(if (shoulderHalfEnabled) "■ إيقاف النصف الأيسر" else "▶ تشغيل النصف الأيسر") {}
+        leftToggle.setOnClickListener {
+            toggleLeftEngine()
+            leftToggle.text = if (shoulderHalfEnabled) "■ إيقاف النصف الأيسر" else "▶ تشغيل النصف الأيسر"
+            menuStatusText?.text = combinedStatusText()
+        }
+        body.addView(leftToggle, matchWrap(dp(54)))
+        body.addView(sectionLabel("SHOULDER  •  R / L", Color.rgb(150, 49, 76)), matchWrap())
+        body.addView(shoulderControlCard(), matchWrap())
+    }
+
+    addAccordionSection("الدائرة R/L", Color.rgb(155, 95, 25)) { body ->
+        if (!::manualTapPair.isInitialized) {
+            body.addView(sectionLabel("الدائرة اليدوية غير جاهزة", Color.rgb(155, 95, 25)), matchWrap())
+        } else {
             val manualRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-            manualRow.addView(
-                microCard(if (manualTapPair.isEnabled) "■ إيقاف" else "▶ تشغيل") {
-                    manualTapPair.toggleEnabled()
-                    updateButtonVisual()
-                    closeMenu()
-                },
-                LinearLayout.LayoutParams(0, dp(38), 1f),
-            )
-            manualRow.addView(
-                microCard("✥ تعديل") {
-                    closeMenu()
-                    manualTapPair.beginEditing()
-                    updateButtonVisual()
-                    showMessage("حرّك دائرة R/L اليدوية ثم افتح القائمة واضغط حفظ")
-                },
-                LinearLayout.LayoutParams(0, dp(38), 1f),
-            )
-            manualRow.addView(
-                microCard("✓ حفظ") {
-                    manualTapPair.finishEditing()
-                    updateButtonVisual()
-                    closeMenu()
-                    showMessage("تم حفظ موضع دائرة R/L اليدوية")
-                },
-                LinearLayout.LayoutParams(0, dp(38), 1f),
-            )
-            manualRow.addView(
-                microCard(if (manualTapPair.isVisible) "◉ إخفاء" else "○ إظهار") {
-                    manualTapPair.toggleVisible()
-                    closeMenu()
-                },
-                LinearLayout.LayoutParams(0, dp(38), 1f),
-            )
-            content.addView(manualRow, matchWrap(dp(40)))
+            val enabledButton = microCard(if (manualTapPair.isEnabled) "■ إيقاف" else "▶ تشغيل") {}
+            enabledButton.setOnClickListener {
+                manualTapPair.toggleEnabled()
+                enabledButton.text = if (manualTapPair.isEnabled) "■ إيقاف" else "▶ تشغيل"
+                updateButtonVisual()
+                menuStatusText?.text = combinedStatusText()
+            }
+            manualRow.addView(enabledButton, LinearLayout.LayoutParams(0, dp(38), 1f))
+            manualRow.addView(microCard("✥ تعديل") {
+                closeMenu()
+                manualTapPair.beginEditing()
+                updateButtonVisual()
+                showMessage("حرّك دائرة R/L اليدوية ثم افتح القائمة واضغط حفظ")
+            }, LinearLayout.LayoutParams(0, dp(38), 1f))
+            manualRow.addView(microCard("✓ حفظ") {
+                manualTapPair.finishEditing()
+                updateButtonVisual()
+                closeMenu()
+                showMessage("تم حفظ موضع دائرة R/L اليدوية")
+            }, LinearLayout.LayoutParams(0, dp(38), 1f))
+            val visibleButton = microCard(if (manualTapPair.isVisible) "◉ إخفاء" else "○ إظهار") {}
+            visibleButton.setOnClickListener {
+                manualTapPair.toggleVisible()
+                visibleButton.text = if (manualTapPair.isVisible) "◉ إخفاء" else "○ إظهار"
+            }
+            manualRow.addView(visibleButton, LinearLayout.LayoutParams(0, dp(38), 1f))
+            body.addView(manualRow, matchWrap(dp(40)))
 
             val bindRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-            bindRow.addView(
-                microCard(if (manualTapPair.bindingLabel == "R") "● ربط بـ R" else "○ ربط بـ R") {
-                    manualTapPair.bindToR()
-                    closeMenu()
-                    showMessage("تم ربط الدائرة اليدوية بـ R")
-                },
-                LinearLayout.LayoutParams(0, dp(34), 1f),
-            )
-            bindRow.addView(
-                microCard(if (manualTapPair.bindingLabel == "L") "● ربط بـ L" else "○ ربط بـ L") {
-                    manualTapPair.bindToL()
-                    closeMenu()
-                    showMessage("تم ربط الدائرة اليدوية بـ L")
-                },
-                LinearLayout.LayoutParams(0, dp(34), 1f),
-            )
-            content.addView(bindRow, matchWrap(dp(36)))
+            val bindRealR = microCard("") {}
+            val bindRealL = microCard("") {}
+            fun refreshBindingButtons() {
+                bindRealR.text = if (manualTapPair.bindingLabel == "R") "● ربط بـ L" else "○ ربط بـ L"
+                bindRealL.text = if (manualTapPair.bindingLabel == "L") "● ربط بـ R" else "○ ربط بـ R"
+                menuStatusText?.text = combinedStatusText()
+            }
+            bindRealR.setOnClickListener {
+                manualTapPair.bindToR()
+                refreshBindingButtons()
+                showMessage("تم ربط الدائرة اليدوية بـ L")
+            }
+            bindRealL.setOnClickListener {
+                manualTapPair.bindToL()
+                refreshBindingButtons()
+                showMessage("تم ربط الدائرة اليدوية بـ R")
+            }
+            bindRow.addView(bindRealR, LinearLayout.LayoutParams(0, dp(36), 1f))
+            bindRow.addView(bindRealL, LinearLayout.LayoutParams(0, dp(36), 1f))
+            refreshBindingButtons()
+            body.addView(bindRow, matchWrap(dp(38)))
         }
-
-        content.addView(sectionLabel("SHOULDER  •  R / L", Color.rgb(150, 49, 76)), matchWrap())
-        content.addView(shoulderControlCard(), matchWrap())
-
-        content.addView(menuButton("إغلاق كل شيء وإغلاق التطبيق") { shutdownAndExitApp() }, matchWrap(dp(50), danger = true))
-
-        val scroll = ScrollView(this).apply {
-            isFillViewport = true
-            isVerticalScrollBarEnabled = true
-            addView(content, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT))
-        }
-        root.addView(scroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
-
-        val margin = dp(10)
-        val availableWidth = max(screenWidth - margin * 2, 1)
-        val availableHeight = max(screenHeight - margin * 2, 1)
-        val width = min(dp(430), availableWidth).coerceAtLeast(min(dp(230), availableWidth))
-        val height = min(dp(590), availableHeight).coerceAtLeast(min(dp(220), availableHeight))
-        val lp = WindowManager.LayoutParams(
-            width,
-            height,
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
-            PixelFormat.TRANSLUCENT,
-        ).apply {
-            gravity = Gravity.TOP or Gravity.START
-            x = preferences.getInt(KEY_MENU_X, ((screenWidth - width) / 2).coerceAtLeast(margin))
-            y = preferences.getInt(KEY_MENU_Y, ((screenHeight - height) / 2).coerceAtLeast(margin))
-        }
-        menuPanel = root
-        menuPanelParams = lp
-        clampMenuPosition(lp)
-        windowManager.addView(root, lp)
-        attachMenuDrag(header, root, lp)
     }
+
+    content.addView(menuButton("إغلاق كل شيء وإغلاق التطبيق") { shutdownAndExitApp() }, matchWrap(dp(50), danger = true))
+
+    val scroll = ScrollView(this).apply {
+        isFillViewport = true
+        isVerticalScrollBarEnabled = true
+        addView(content, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT))
+    }
+    root.addView(scroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+
+    val margin = dp(10)
+    val availableWidth = max(screenWidth - margin * 2, 1)
+    val availableHeight = max(screenHeight - margin * 2, 1)
+    val width = min(dp(430), availableWidth).coerceAtLeast(min(dp(230), availableWidth))
+    val height = min(dp(590), availableHeight).coerceAtLeast(min(dp(220), availableHeight))
+    val lp = WindowManager.LayoutParams(
+        width,
+        height,
+        WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+        WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+        PixelFormat.TRANSLUCENT,
+    ).apply {
+        gravity = Gravity.TOP or Gravity.START
+        x = preferences.getInt(KEY_MENU_X, ((screenWidth - width) / 2).coerceAtLeast(margin))
+        y = preferences.getInt(KEY_MENU_Y, ((screenHeight - height) / 2).coerceAtLeast(margin))
+    }
+    menuPanel = root
+    menuPanelParams = lp
+    clampMenuPosition(lp)
+    windowManager.addView(root, lp)
+    attachMenuDrag(header, root, lp)
+}
 
     private fun shoulderControlCard(): View {
-        val shoulderPrefs = getSharedPreferences(ShoulderCaptureService.PREFS_NAME, MODE_PRIVATE)
-        val card = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(10), dp(8), dp(10), dp(8))
-            background = roundedBackground(Color.rgb(255, 238, 242), Color.rgb(226, 105, 133), 14f)
-        }
-
-        fun sideRow(label: String, prefix: String): View {
-            val row = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-            }
-            val hold = Switch(this).apply {
-                text = "$label HOLD"
-                isChecked = shoulderPrefs.getBoolean("shoulder_${prefix}_hold", false)
-                setTextColor(Color.rgb(68, 35, 45))
-            }
-            val value = TextView(this).apply {
-                gravity = Gravity.CENTER
-                textSize = 13f
-                setTextColor(Color.rgb(68, 35, 45))
-            }
-            fun refresh() {
-                value.text = if (hold.isChecked) "${shoulderPrefs.getInt("shoulder_${prefix}_seconds", 1).coerceIn(1, 5)}s" else "Flash"
-            }
-            hold.setOnCheckedChangeListener { _, checked ->
-                shoulderPrefs.edit().putBoolean("shoulder_${prefix}_hold", checked).apply()
-                refresh()
-            }
-            val minus = menuButton("−") {
-                val n = (shoulderPrefs.getInt("shoulder_${prefix}_seconds", 1) - 1).coerceIn(1, 5)
-                shoulderPrefs.edit().putInt("shoulder_${prefix}_seconds", n).apply()
-                refresh()
-            }
-            val plus = menuButton("+") {
-                val n = (shoulderPrefs.getInt("shoulder_${prefix}_seconds", 1) + 1).coerceIn(1, 5)
-                shoulderPrefs.edit().putInt("shoulder_${prefix}_seconds", n).apply()
-                refresh()
-            }
-            row.addView(hold, LinearLayout.LayoutParams(0, dp(46), 1f))
-            row.addView(minus, LinearLayout.LayoutParams(dp(48), dp(42)))
-            row.addView(value, LinearLayout.LayoutParams(dp(54), dp(42)))
-            row.addView(plus, LinearLayout.LayoutParams(dp(48), dp(42)))
-            refresh()
-            return row
-        }
-
-        card.addView(sideRow("R", "r"), matchWrap(dp(48)))
-        card.addView(sideRow("L", "l"), matchWrap(dp(48)))
-
-        val editRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        editRow.addView(menuButton("تعديل R") { shoulderAction(ShoulderCaptureService.ACTION_EDIT_R) }, LinearLayout.LayoutParams(0, dp(46), 1f))
-        editRow.addView(menuButton("تعديل L") { shoulderAction(ShoulderCaptureService.ACTION_EDIT_L) }, LinearLayout.LayoutParams(0, dp(46), 1f))
-        editRow.addView(menuButton("✓ حفظ") { shoulderAction(ShoulderCaptureService.ACTION_DONE_EDIT) }, LinearLayout.LayoutParams(0, dp(46), 1f))
-        card.addView(editRow, matchWrap(dp(48)))
-
-        val resetRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        resetRow.addView(menuButton("↺ R للمنتصف") { shoulderAction(ShoulderCaptureService.ACTION_RESET_R) }, LinearLayout.LayoutParams(0, dp(46), 1f))
-        resetRow.addView(menuButton("↺ L للمنتصف") { shoulderAction(ShoulderCaptureService.ACTION_RESET_L) }, LinearLayout.LayoutParams(0, dp(46), 1f))
-        card.addView(resetRow, matchWrap(dp(48)))
-        return card
+    val shoulderPrefs = getSharedPreferences(ShoulderCaptureService.PREFS_NAME, MODE_PRIVATE)
+    val card = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        setPadding(dp(10), dp(8), dp(10), dp(8))
+        background = roundedBackground(Color.rgb(255, 238, 242), Color.rgb(226, 105, 133), 14f)
     }
+
+    fun readQuarters(prefix: String): Int {
+        val key = "shoulder_${prefix}_hold_quarters"
+        if (shoulderPrefs.contains(key)) return shoulderPrefs.getInt(key, 0).coerceIn(0, 20)
+        val migrated = if (shoulderPrefs.getBoolean("shoulder_${prefix}_hold", false)) {
+            shoulderPrefs.getInt("shoulder_${prefix}_seconds", 1).coerceIn(1, 5) * 4
+        } else {
+            0
+        }
+        shoulderPrefs.edit().putInt(key, migrated).apply()
+        return migrated
+    }
+
+    fun saveQuarters(prefix: String, quarters: Int) {
+        val value = quarters.coerceIn(0, 20)
+        val editor = shoulderPrefs.edit()
+            .putInt("shoulder_${prefix}_hold_quarters", value)
+            .putBoolean("shoulder_${prefix}_hold", value > 0)
+        if (value > 0) {
+            editor.putInt("shoulder_${prefix}_seconds", ((value + 2) / 4).coerceIn(1, 5))
+        }
+        editor.apply()
+        runCatching {
+            startService(Intent(this, ShoulderCaptureService::class.java).apply {
+                action = ShoulderCaptureService.ACTION_SYNC_CONFIG
+            })
+        }
+    }
+
+    fun formatQuarters(quarters: Int): String {
+        if (quarters <= 0) return "0s • Flash"
+        val whole = quarters / 4
+        val fraction = when (quarters % 4) {
+            0 -> ""
+            1 -> ".25"
+            2 -> ".5"
+            else -> ".75"
+        }
+        return "$whole${fraction}s"
+    }
+
+    fun sideRow(label: String, prefix: String): View {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val sideLabel = TextView(this).apply {
+            text = "$label HOLD"
+            gravity = Gravity.CENTER
+            textSize = 12f
+            setTextColor(Color.rgb(68, 35, 45))
+        }
+        val value = TextView(this).apply {
+            gravity = Gravity.CENTER
+            textSize = 12f
+            setTextColor(Color.rgb(68, 35, 45))
+        }
+        fun refresh() {
+            value.text = formatQuarters(readQuarters(prefix))
+            menuStatusText?.text = combinedStatusText()
+        }
+        val minus = menuButton("−") {
+            saveQuarters(prefix, readQuarters(prefix) - 1)
+            refresh()
+        }
+        val plus = menuButton("+") {
+            saveQuarters(prefix, readQuarters(prefix) + 1)
+            refresh()
+        }
+        row.addView(sideLabel, LinearLayout.LayoutParams(0, dp(44), 1f))
+        row.addView(minus, LinearLayout.LayoutParams(dp(48), dp(42)))
+        row.addView(value, LinearLayout.LayoutParams(dp(88), dp(42)))
+        row.addView(plus, LinearLayout.LayoutParams(dp(48), dp(42)))
+        refresh()
+        return row
+    }
+
+    card.addView(sideRow("R", "r"), matchWrap(dp(48)))
+    card.addView(sideRow("L", "l"), matchWrap(dp(48)))
+
+    val editRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+    editRow.addView(menuButton("تعديل R") { shoulderAction(ShoulderCaptureService.ACTION_EDIT_R) }, LinearLayout.LayoutParams(0, dp(46), 1f))
+    editRow.addView(menuButton("تعديل L") { shoulderAction(ShoulderCaptureService.ACTION_EDIT_L) }, LinearLayout.LayoutParams(0, dp(46), 1f))
+    editRow.addView(menuButton("✓ حفظ") { shoulderAction(ShoulderCaptureService.ACTION_DONE_EDIT) }, LinearLayout.LayoutParams(0, dp(46), 1f))
+    card.addView(editRow, matchWrap(dp(48)))
+
+    val resetRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+    resetRow.addView(menuButton("↺ R للمنتصف") { shoulderAction(ShoulderCaptureService.ACTION_RESET_R) }, LinearLayout.LayoutParams(0, dp(46), 1f))
+    resetRow.addView(menuButton("↺ L للمنتصف") { shoulderAction(ShoulderCaptureService.ACTION_RESET_L) }, LinearLayout.LayoutParams(0, dp(46), 1f))
+    card.addView(resetRow, matchWrap(dp(48)))
+    return card
+}
 
     private fun sectionLabel(value: String, color: Int) = TextView(this).apply {
         text = value
@@ -1077,7 +1145,7 @@ class ScreenCaptureService : Service() {
 
     private fun combinedStatusText(): String {
         val manual = if (::manualTapPair.isInitialized) {
-            "MANUAL ${manualTapPair.bindingLabel} ${if (manualTapPair.isEnabled) "ON" else "OFF"}"
+            "MANUAL ${manualTapPair.displayBindingLabel} ${if (manualTapPair.isEnabled) "ON" else "OFF"}"
         } else {
             "MANUAL OFF"
         }

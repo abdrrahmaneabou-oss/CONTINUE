@@ -54,6 +54,10 @@ internal class ManualNubiaPairController(
     val bindingLabel: String
         get() = binding.name
 
+    /** UI-only R/L swap. Real binding and execution stay unchanged. */
+    val displayBindingLabel: String
+        get() = if (binding == Binding.R) Binding.L.name else Binding.R.name
+
     fun create(width: Int, height: Int) {
         if (circle != null) return
         screenWidth = width.coerceAtLeast(1)
@@ -225,7 +229,7 @@ internal class ManualNubiaPairController(
     private fun applyState() {
         val current = circle ?: return
         current.view.visibility = if (isVisible) View.VISIBLE else View.INVISIBLE
-        current.view.setState(isEnabled, isEditing, binding.name)
+        current.view.setState(isEnabled, isEditing, binding.name, displayBindingLabel)
         val touchable = isEditing || (isEnabled && isVisible)
         current.params.flags = if (touchable) baseFlags()
         else baseFlags() or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
@@ -294,11 +298,18 @@ internal class ManualNubiaPairController(
         private var enabled = true
         private var editing = false
         private var binding = Binding.R.name
+        private var displayBinding = Binding.L.name
 
-        fun setState(isEnabled: Boolean, isEditing: Boolean, bindingName: String) {
+        fun setState(
+            isEnabled: Boolean,
+            isEditing: Boolean,
+            bindingName: String,
+            displayBindingName: String,
+        ) {
             enabled = isEnabled
             editing = isEditing
             binding = bindingName
+            displayBinding = displayBindingName
             invalidate()
         }
 
@@ -332,7 +343,7 @@ internal class ManualNubiaPairController(
             canvas.drawCircle(cx, cy, radius, fill)
             canvas.drawCircle(cx, cy, radius, stroke)
             val baseline = cy - (textPaint.ascent() + textPaint.descent()) / 2f
-            canvas.drawText(binding, cx, baseline, textPaint)
+            canvas.drawText(displayBinding, cx, baseline, textPaint)
         }
 
         private fun dp(value: Int): Int =

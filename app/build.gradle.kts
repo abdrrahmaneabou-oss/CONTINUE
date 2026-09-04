@@ -11,8 +11,8 @@ android {
         applicationId = "com.pixeltrigger.app"
         minSdk = 29
         targetSdk = 35
-        versionCode = 61
-        versionName = "5.0-group5-independent-burst"
+        versionCode = 62
+        versionName = "6.0-clean-menu-quarter-hold"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 

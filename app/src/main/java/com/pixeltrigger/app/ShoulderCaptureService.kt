@@ -182,11 +182,30 @@ class ShoulderCaptureService : Service() {
         return PixelSampler.sampleCircularRegion(image, centerX, centerY, radiusX, radiusY)
     }
 
-    private fun pressDurationMs(side: Side): Int {
-        val prefix = if (side == Side.R) "r" else "l"
-        if (!prefs.getBoolean("shoulder_${prefix}_hold", false)) return 0
-        return prefs.getInt("shoulder_${prefix}_seconds", 1).coerceIn(1, 5) * 1000
+    private fun holdQuarters(side: Side): Int {
+    val prefix = if (side == Side.R) "r" else "l"
+    val quarterKey = "shoulder_${prefix}_hold_quarters"
+    if (prefs.contains(quarterKey)) {
+        return prefs.getInt(quarterKey, 0).coerceIn(0, HOLD_MAX_QUARTERS)
     }
+    if (!prefs.getBoolean("shoulder_${prefix}_hold", false)) return 0
+    return prefs.getInt("shoulder_${prefix}_seconds", 1).coerceIn(1, 5) * 4
+}
+
+private fun pressDurationMs(side: Side): Int = holdQuarters(side) * HOLD_QUARTER_MS
+
+private fun holdLabel(side: Side): String {
+    val quarters = holdQuarters(side)
+    if (quarters == 0) return "Flash"
+    val whole = quarters / 4
+    val fraction = when (quarters % 4) {
+        0 -> ""
+        1 -> ".25"
+        2 -> ".5"
+        else -> ".75"
+    }
+    return "$whole${fraction}s"
+}
 
     /** Single source of truth for physical-style R/L firing. */
     private fun fireConfiguredSide(side: Side): Boolean {
@@ -420,12 +439,12 @@ class ShoulderCaptureService : Service() {
     }
 
     private fun summary(): String {
-        val r = if (!prefs.getBoolean("shoulder_r_hold", false)) "Flash" else "${prefs.getInt("shoulder_r_seconds", 1).coerceIn(1, 5)}s"
-        val l = if (!prefs.getBoolean("shoulder_l_hold", false)) "Flash" else "${prefs.getInt("shoulder_l_seconds", 1).coerceIn(1, 5)}s"
-        val state = if (engineEnabled) "ON" else "OFF"
-        val reserved = manualReservedSide?.name?.let { " • Manual $it" } ?: ""
-        return "R $r  •  L $l  •  $state$reserved"
-    }
+    val r = holdLabel(Side.R)
+    val l = holdLabel(Side.L)
+    val state = if (engineEnabled) "ON" else "OFF"
+    val reserved = manualReservedSide?.name?.let { " • Manual $it" } ?: ""
+    return "R $r  •  L $l  •  $state$reserved"
+}
 
     private fun overlayParams(width: Int, height: Int) = WindowManager.LayoutParams(
         width,
@@ -519,6 +538,8 @@ class ShoulderCaptureService : Service() {
         const val PREFS_NAME = "pixeltrigger_shoulder_v5"
         const val KEY_ENGINE_ENABLED = "shoulder_half_enabled"
         const val MONITOR_DIAMETER_MM = 0.3f
+        private const val HOLD_QUARTER_MS = 250
+        private const val HOLD_MAX_QUARTERS = 20
         private const val CHANNEL_ID = "pixeltrigger_shoulder"
         private const val NOTIFICATION_ID = 5205
     }

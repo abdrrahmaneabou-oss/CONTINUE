@@ -24,8 +24,9 @@ import kotlin.math.roundToInt
  * - the knob is the only normal touch target and consumes the user's DOWN/MOVE/UP;
  * - while editing, the base becomes draggable and the knob becomes non-touchable.
  *
- * R/L itself is not a screen injection. The knob drives the existing shoulder
- * uinput backend with a real key DOWN on finger-down and key UP on finger-up.
+ * R/L itself is not a screen injection. Each contact starts PENDING: reaching
+ * the knob travel limit chooses R immediately; otherwise the user-selected delay
+ * chooses L. The chosen shoulder remains DOWN until that same finger is released.
  */
 class AnalogShoulderController(
     private val context: Context,
@@ -33,6 +34,7 @@ class AnalogShoulderController(
     private val prefs: SharedPreferences,
 ) {
     private enum class Binding { R, L }
+    private enum class Decision { IDLE, PENDING, R_ACTIVE, L_ACTIVE }
 
     private val positionStore = OrientationPositionStore(prefs)
 
@@ -40,9 +42,9 @@ class AnalogShoulderController(
     private var screenHeight = 1
     private var baseSizeHundredths = normalizeSize(prefs.getInt(KEY_BASE_SIZE, DEFAULT_BASE_SIZE))
     private var knobSizeHundredths = normalizeSize(prefs.getInt(KEY_KNOB_SIZE, DEFAULT_KNOB_SIZE))
-    private var binding = runCatching {
-        Binding.valueOf(prefs.getString(KEY_BINDING, Binding.R.name) ?: Binding.R.name)
-    }.getOrDefault(Binding.R)
+    private var decisionDelayMs = normalizeDecisionDelay(
+        prefs.getInt(KEY_DECISION_DELAY_MS, DEFAULT_DECISION_DELAY_MS),
+    )
 
     var isVisible: Boolean = prefs.getBoolean(KEY_VISIBLE, true)
         private set
@@ -55,21 +57,15 @@ class AnalogShoulderController(
     private var baseParams: WindowManager.LayoutParams? = null
     private var knobParams: WindowManager.LayoutParams? = null
 
-    private var pressActive = false
-    private var pressBinding = Binding.R
-    private var downAtMs = 0L
-    private var downRawX = 0f
-    private var downRawY = 0f
-    private var movedDuringPress = false
+    private var decision = Decision.IDLE
+    private var pressBinding = Binding.L
     private var fingerOffsetX = 0f
     private var fingerOffsetY = 0f
+    private var pendingDecisionRunnable: Runnable? = null
 
-    private var quickTapCount = 0
-    private var lastQuickTapUpMs = 0L
-
-    val bindingLabel: String get() = binding.name
     val baseSizeLabel: String get() = formatSize(baseSizeHundredths)
     val knobSizeLabel: String get() = formatSize(knobSizeHundredths)
+    val decisionDelayLabel: String get() = "$decisionDelayMs ms"
 
     fun create(width: Int, height: Int) {
         if (baseView != null) return
@@ -154,7 +150,6 @@ class AnalogShoulderController(
 
     fun beginEditing() {
         forceRelease()
-        quickTapCount = 0
         isEditing = true
         centerKnob()
         baseView?.isEditing = true
@@ -182,6 +177,16 @@ class AnalogShoulderController(
     fun increaseBaseSize() = setBaseSize(stepSize(baseSizeHundredths, +1))
     fun decreaseKnobSize() = setKnobSize(stepSize(knobSizeHundredths, -1))
     fun increaseKnobSize() = setKnobSize(stepSize(knobSizeHundredths, +1))
+    fun decreaseDecisionDelay() = setDecisionDelay(decisionDelayMs - DECISION_DELAY_STEP_MS)
+    fun increaseDecisionDelay() = setDecisionDelay(decisionDelayMs + DECISION_DELAY_STEP_MS)
+
+    private fun setDecisionDelay(value: Int) {
+        val normalized = normalizeDecisionDelay(value)
+        if (normalized == decisionDelayMs) return
+        forceRelease()
+        decisionDelayMs = normalized
+        prefs.edit().putInt(KEY_DECISION_DELAY_MS, normalized).apply()
+    }
 
     private fun setBaseSize(value: Int) {
         val normalized = normalizeSize(value)
@@ -229,52 +234,35 @@ class AnalogShoulderController(
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     if (!isVisible || isEditing || !inputEnabled) return@setOnTouchListener true
-                    quickTapCount = if (
-                        lastQuickTapUpMs > 0L && event.eventTime - lastQuickTapUpMs <= TRIPLE_TAP_GAP_MS
-                    ) quickTapCount else 0
-
+                    forceRelease()
                     val center = knobCenter()
                     fingerOffsetX = event.rawX - center.first
                     fingerOffsetY = event.rawY - center.second
-                    downRawX = event.rawX
-                    downRawY = event.rawY
-                    downAtMs = event.eventTime
-                    movedDuringPress = false
-                    pressBinding = binding
-                    pressActive = beginShoulderPress(pressBinding)
-                    view.alpha = 0.78f
+                    decision = Decision.PENDING
+                    view.alpha = 0.90f
+                    rebuildKnobVisual()
+                    schedulePendingL(view)
                     true
                 }
 
                 MotionEvent.ACTION_MOVE -> {
                     if (!isEditing && inputEnabled && isVisible) {
-                        val dxFromDown = event.rawX - downRawX
-                        val dyFromDown = event.rawY - downRawY
-                        if (dxFromDown * dxFromDown + dyFromDown * dyFromDown > dragSlopPxSquared()) {
-                            movedDuringPress = true
-                            quickTapCount = 0
-                        }
-                        moveKnobToward(
+                        val reachedRLimit = moveKnobToward(
                             event.rawX - fingerOffsetX,
                             event.rawY - fingerOffsetY,
                         )
+                        if (decision == Decision.PENDING && reachedRLimit) {
+                            activateDecision(Binding.R)
+                        }
                     }
                     true
                 }
 
-                MotionEvent.ACTION_UP -> {
-                    endCurrentPress()
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    finishContact()
                     view.alpha = 1f
                     centerKnob()
-                    registerQuickTapIfEligible(event.eventTime)
-                    true
-                }
-
-                MotionEvent.ACTION_CANCEL -> {
-                    endCurrentPress()
-                    view.alpha = 1f
-                    quickTapCount = 0
-                    centerKnob()
+                    rebuildKnobVisual()
                     true
                 }
 
@@ -283,25 +271,41 @@ class AnalogShoulderController(
         }
     }
 
-    private fun registerQuickTapIfEligible(upTimeMs: Long) {
-        val duration = upTimeMs - downAtMs
-        if (movedDuringPress || duration !in 0..TRIPLE_TAP_MAX_HOLD_MS) {
-            quickTapCount = 0
-            lastQuickTapUpMs = 0L
-            return
+    private fun schedulePendingL(view: View) {
+        cancelPendingDecision()
+        val runnable = Runnable {
+            pendingDecisionRunnable = null
+            if (decision == Decision.PENDING && isVisible && !isEditing && inputEnabled) {
+                activateDecision(Binding.L)
+            }
         }
-        quickTapCount = if (
-            lastQuickTapUpMs > 0L && upTimeMs - lastQuickTapUpMs <= TRIPLE_TAP_GAP_MS
-        ) quickTapCount + 1 else 1
-        lastQuickTapUpMs = upTimeMs
+        pendingDecisionRunnable = runnable
+        view.postDelayed(runnable, decisionDelayMs.toLong())
+    }
 
-        if (quickTapCount >= 3) {
-            binding = if (binding == Binding.R) Binding.L else Binding.R
-            prefs.edit().putString(KEY_BINDING, binding.name).apply()
-            quickTapCount = 0
-            lastQuickTapUpMs = 0L
-            rebuildKnobVisual()
+    private fun cancelPendingDecision() {
+        val runnable = pendingDecisionRunnable ?: return
+        knobView?.removeCallbacks(runnable)
+        pendingDecisionRunnable = null
+    }
+
+    private fun activateDecision(side: Binding) {
+        if (decision != Decision.PENDING) return
+        cancelPendingDecision()
+        pressBinding = side
+        decision = if (side == Binding.R) Decision.R_ACTIVE else Decision.L_ACTIVE
+        beginShoulderPress(side)
+        knobView?.alpha = 0.78f
+        rebuildKnobVisual()
+    }
+
+    private fun finishContact() {
+        when (decision) {
+            Decision.PENDING -> cancelPendingDecision()
+            Decision.R_ACTIVE, Decision.L_ACTIVE -> endCurrentPress()
+            Decision.IDLE -> Unit
         }
+        decision = Decision.IDLE
     }
 
     private fun beginShoulderPress(side: Binding): Boolean = when (side) {
@@ -310,36 +314,28 @@ class AnalogShoulderController(
     }
 
     private fun endCurrentPress() {
-        if (!pressActive) {
-            // Release is intentionally still attempted: if the DOWN Binder call
-            // succeeded but its result was lost, UP must remain fail-safe.
-            when (pressBinding) {
-                Binding.R -> ShoulderCaptureService.endFingerHoldR()
-                Binding.L -> ShoulderCaptureService.endFingerHoldL()
-            }
-            return
-        }
+        if (decision != Decision.R_ACTIVE && decision != Decision.L_ACTIVE) return
         when (pressBinding) {
             Binding.R -> ShoulderCaptureService.endFingerHoldR()
             Binding.L -> ShoulderCaptureService.endFingerHoldL()
         }
-        pressActive = false
     }
 
     private fun forceRelease() {
-        when (pressBinding) {
-            Binding.R -> ShoulderCaptureService.endFingerHoldR()
-            Binding.L -> ShoulderCaptureService.endFingerHoldL()
+        cancelPendingDecision()
+        if (decision == Decision.R_ACTIVE || decision == Decision.L_ACTIVE) {
+            endCurrentPress()
         }
         ShoulderCaptureService.endAnyFingerHold()
-        pressActive = false
+        decision = Decision.IDLE
         knobView?.alpha = 1f
         centerKnob()
+        rebuildKnobVisual()
     }
 
-    private fun moveKnobToward(desiredCenterX: Float, desiredCenterY: Float) {
-        val lp = knobParams ?: return
-        val view = knobView ?: return
+    private fun moveKnobToward(desiredCenterX: Float, desiredCenterY: Float): Boolean {
+        val lp = knobParams ?: return false
+        val view = knobView ?: return false
         val baseCenter = baseCenter()
         var dx = desiredCenterX - baseCenter.first
         var dy = desiredCenterY - baseCenter.second
@@ -361,6 +357,12 @@ class AnalogShoulderController(
         lp.x = (centerX - diameter / 2f).roundToInt()
         lp.y = (centerY - diameter / 2f).roundToInt()
         runCatching { windowManager.updateViewLayout(view, lp) }
+
+        // R uses the actual post-screen-clamp knob position.
+        val actualDx = centerX - baseCenter.first
+        val actualDy = centerY - baseCenter.second
+        val actualDistance = hypot(actualDx.toDouble(), actualDy.toDouble()).toFloat()
+        return actualDistance + 0.5f >= maxOffset
     }
 
     private fun centerKnob(updateWindow: Boolean = true) {
@@ -438,11 +440,23 @@ class AnalogShoulderController(
 
     private fun rebuildKnobVisual() {
         knobView?.apply {
-            text = binding.name
-            textSize = max(10f, knobDiameterPx() / context.resources.displayMetrics.scaledDensity * 0.30f)
+            text = when (decision) {
+                Decision.IDLE -> "R/L"
+                Decision.PENDING -> "…"
+                Decision.R_ACTIVE -> "R"
+                Decision.L_ACTIVE -> "L"
+            }
+            textSize = max(9f, knobDiameterPx() / context.resources.displayMetrics.scaledDensity * 0.26f)
             background = android.graphics.drawable.GradientDrawable().apply {
                 shape = android.graphics.drawable.GradientDrawable.OVAL
-                setColor(if (binding == Binding.R) Color.rgb(116, 63, 205) else Color.rgb(30, 139, 184))
+                setColor(
+                    when (decision) {
+                        Decision.R_ACTIVE -> Color.rgb(116, 63, 205)
+                        Decision.L_ACTIVE -> Color.rgb(30, 139, 184)
+                        Decision.PENDING -> Color.rgb(92, 102, 128)
+                        Decision.IDLE -> Color.rgb(67, 112, 190)
+                    },
+                )
                 setStroke(max(dp(1), knobDiameterPx() / 22), Color.argb(230, 245, 245, 255))
             }
         }
@@ -493,10 +507,6 @@ class AnalogShoulderController(
         return max((cm * ((x + y) / 2f) / 2.54f).roundToInt(), 1)
     }
 
-    private fun dragSlopPxSquared(): Float {
-        val slop = dp(10).toFloat()
-        return slop * slop
-    }
 
     fun destroy() {
         forceRelease()
@@ -540,19 +550,27 @@ class AnalogShoulderController(
     companion object {
         private const val KEY_BASE_SIZE = "v6_analog_base_size_hundredths_cm"
         private const val KEY_KNOB_SIZE = "v6_analog_knob_size_hundredths_cm"
-        private const val KEY_BINDING = "v6_analog_binding"
+        private const val KEY_DECISION_DELAY_MS = "v6_analog_decision_delay_ms"
         private const val KEY_VISIBLE = "v6_analog_visible"
         private const val POSITION_KEY = "v6.analog.base"
 
         private const val DEFAULT_BASE_SIZE = 155
         private const val DEFAULT_KNOB_SIZE = 125
-        private const val TRIPLE_TAP_MAX_HOLD_MS = 220L
-        private const val TRIPLE_TAP_GAP_MS = 300L
+        private const val DEFAULT_DECISION_DELAY_MS = 150
+        private const val DECISION_DELAY_MIN_MS = 50
+        private const val DECISION_DELAY_MAX_MS = 500
+        private const val DECISION_DELAY_STEP_MS = 50
 
         // Requested progression: 0.25, 0.35, ... 1.95, with 2.00 as the final cap.
         private val SIZE_STEPS = ((25..195 step 10).toList() + 200).toIntArray()
 
         private fun normalizeSize(value: Int): Int = SIZE_STEPS.minByOrNull { kotlin.math.abs(it - value) } ?: 25
+
+        private fun normalizeDecisionDelay(value: Int): Int {
+            val clamped = value.coerceIn(DECISION_DELAY_MIN_MS, DECISION_DELAY_MAX_MS)
+            return ((clamped + DECISION_DELAY_STEP_MS / 2) / DECISION_DELAY_STEP_MS * DECISION_DELAY_STEP_MS)
+                .coerceIn(DECISION_DELAY_MIN_MS, DECISION_DELAY_MAX_MS)
+        }
 
         private fun stepSize(current: Int, delta: Int): Int {
             val normalized = normalizeSize(current)

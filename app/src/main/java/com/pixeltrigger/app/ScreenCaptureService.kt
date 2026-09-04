@@ -955,7 +955,7 @@ class ScreenCaptureService : Service() {
 
         if (::analogShoulder.isInitialized) {
             content.addView(
-                sectionLabel("V6  •  ANALOG SHOULDER  •  ${analogShoulder.bindingLabel}", Color.rgb(38, 118, 150)),
+                sectionLabel("V6  •  ANALOG SHOULDER  •  R بالسحب / L بالانتظار", Color.rgb(38, 118, 150)),
                 matchWrap(),
             )
             val analogActions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
@@ -1004,8 +1004,17 @@ class ScreenCaptureService : Service() {
                 matchWrap(dp(44)),
             )
             content.addView(
+                analogSizeRow(
+                    "WAIT",
+                    { analogShoulder.decisionDelayLabel },
+                    { analogShoulder.decreaseDecisionDelay() },
+                    { analogShoulder.increaseDecisionDelay() },
+                ),
+                matchWrap(dp(44)),
+            )
+            content.addView(
                 TextView(this).apply {
-                    text = "3 نقرات سريعة تبدّل R/L • الضغط والسحب يبقيان الكتف DOWN • الإفلات = UP"
+                    text = "بلوغ حد السحب قبل انتهاء WAIT = R فورًا • انتهاء WAIT أولًا = L • الإفلات قبل القرار = لا شيء"
                     textSize = 10.5f
                     gravity = Gravity.CENTER
                     setTextColor(Color.rgb(55, 75, 86))
@@ -1181,7 +1190,7 @@ class ScreenCaptureService : Service() {
         } else {
             "MANUAL OFF"
         }
-        val analog = if (::analogShoulder.isInitialized) "V6 ${analogShoulder.bindingLabel}" else "V6 --"
+        val analog = if (::analogShoulder.isInitialized) "V6 R→drag / L→wait" else "V6 --"
         return "PixelProbe: ${engineStatusText()}  •  R/L: ${ShoulderCaptureService.statusSummary()}  •  $manual  •  $analog"
     }
 

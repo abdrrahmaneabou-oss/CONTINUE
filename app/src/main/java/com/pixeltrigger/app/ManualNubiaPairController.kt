@@ -199,11 +199,23 @@ internal class ManualNubiaPairController(
         val radiusX = max(0.5f, crop.width() * screenRadius / sourceWidth)
         val radiusY = max(0.5f, crop.height() * screenRadius / sourceHeight)
         val sample = PixelSampler.sampleCircularRegion(image, centerX, centerY, radiusX, radiusY)
-        val whiteNow = sample?.isArmingWhite() == true
+        val whiteNow = sample?.let(::isMonitorOnColor) == true
         if (whiteNow == monitorWhite) return
 
         monitorWhite = whiteNow
         mainHandler.post { applyState() }
+    }
+
+    /**
+     * R/L center gate only. Keep PixelProbe's global white definition untouched.
+     * Besides normal white, accept the pale yellow sampled from the supplied
+     * reference (#FFE27C / RGB 255,226,124) with a small capture tolerance.
+     */
+    private fun isMonitorOnColor(sample: DetectionEngine.ColorSample): Boolean {
+        if (sample.isArmingWhite()) return true
+        return sample.averageRed in RL_GATE_YELLOW_RED_RANGE &&
+            sample.averageGreen in RL_GATE_YELLOW_GREEN_RANGE &&
+            sample.averageBlue in RL_GATE_YELLOW_BLUE_RANGE
     }
 
     fun destroy() {
@@ -434,6 +446,12 @@ internal class ManualNubiaPairController(
         private const val MONITOR_HOLE_DIAMETER_MM = 1.2f
         private const val HIDDEN_ALPHA = 0.20f
         private const val MIN_FIRE_INTERVAL_MS = 120L
+
+        // Reference supplied by the user: #FFE27C. Tolerances are intentionally
+        // narrow so unrelated yellow/orange UI colors are not treated as white.
+        private val RL_GATE_YELLOW_RED_RANGE = 237..255
+        private val RL_GATE_YELLOW_GREEN_RANGE = 208..244
+        private val RL_GATE_YELLOW_BLUE_RANGE = 102..146
 
         private const val KEY_ENABLED = "manual_pair_enabled"
         private const val KEY_VISIBLE = "manual_pair_visible"

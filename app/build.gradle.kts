@@ -11,8 +11,8 @@ android {
         applicationId = "com.pixeltrigger.app"
         minSdk = 29
         targetSdk = 35
-        versionCode = 63
-        versionName = "6.0-final-white-gate-visibility"
+        versionCode = 64
+        versionName = "6.0-final-white-yellow-gate"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 

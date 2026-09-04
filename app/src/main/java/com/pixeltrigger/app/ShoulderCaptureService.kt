@@ -208,16 +208,20 @@ private fun holdLabel(side: Side): String {
 }
 
     /** Single source of truth for physical-style R/L firing. */
-    private fun fireConfiguredSide(side: Side): Boolean {
+    private fun fireConfiguredSide(side: Side): Boolean =
+        fireSideWithDuration(side, pressDurationMs(side))
+
+    private fun fireSideWithDuration(side: Side, durationMs: Int): Boolean {
         if (!::shoulderInput.isInitialized) return false
         if (!shoulderInput.isReady()) {
             shoulderInput.connect()
             return false
         }
+        val clampedDuration = durationMs.coerceIn(0, HOLD_MAX_QUARTERS * HOLD_QUARTER_MS)
         return if (side == Side.R) {
-            shoulderInput.fireR(pressDurationMs(Side.R))
+            shoulderInput.fireR(clampedDuration)
         } else {
-            shoulderInput.fireL(pressDurationMs(Side.L))
+            shoulderInput.fireL(clampedDuration)
         }
     }
 
@@ -518,6 +522,12 @@ private fun holdLabel(side: Side): String {
         fun fireConfiguredR(): Boolean = activeInstance?.fireConfiguredSide(Side.R) ?: false
 
         fun fireConfiguredL(): Boolean = activeInstance?.fireConfiguredSide(Side.L) ?: false
+
+        fun fireManualR(durationMs: Int): Boolean =
+            activeInstance?.fireSideWithDuration(Side.R, durationMs) ?: false
+
+        fun fireManualL(durationMs: Int): Boolean =
+            activeInstance?.fireSideWithDuration(Side.L, durationMs) ?: false
 
         fun reserveManualR() = setManualReservation(Side.R)
 

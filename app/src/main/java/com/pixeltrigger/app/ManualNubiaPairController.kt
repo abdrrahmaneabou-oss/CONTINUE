@@ -48,6 +48,8 @@ internal class ManualNubiaPairController(
     private var circle: Circle? = null
     private var lastFireAtMs = 0L
     @Volatile private var monitorWhite = false
+    var holdQuarters: Int = preferences.getInt(KEY_HOLD_QUARTERS, 0).coerceIn(0, HOLD_MAX_QUARTERS)
+        private set
     private var binding: Binding = when (preferences.getString(KEY_BINDING, Binding.R.name)) {
         Binding.L.name -> Binding.L
         else -> Binding.R
@@ -79,6 +81,24 @@ internal class ManualNubiaPairController(
             monitorWhite -> "ON"
             else -> "AUTO OFF"
         }
+
+    val holdLabel: String
+        get() {
+            if (holdQuarters <= 0) return "0s • Flash"
+            val whole = holdQuarters / 4
+            val fraction = when (holdQuarters % 4) {
+                0 -> ""
+                1 -> ".25"
+                2 -> ".5"
+                else -> ".75"
+            }
+            return "$whole${fraction}s"
+        }
+
+    fun setHoldQuarters(value: Int) {
+        holdQuarters = value.coerceIn(0, HOLD_MAX_QUARTERS)
+        preferences.edit().putInt(KEY_HOLD_QUARTERS, holdQuarters).apply()
+    }
 
     fun create(width: Int, height: Int) {
         if (circle != null) return
@@ -279,9 +299,10 @@ internal class ManualNubiaPairController(
     }
 
     private fun fireLinkedShoulder() {
+        val durationMs = holdQuarters * HOLD_QUARTER_MS
         when (binding) {
-            Binding.R -> ShoulderCaptureService.fireConfiguredR()
-            Binding.L -> ShoulderCaptureService.fireConfiguredL()
+            Binding.R -> ShoulderCaptureService.fireManualR(durationMs)
+            Binding.L -> ShoulderCaptureService.fireManualL(durationMs)
         }
     }
 
@@ -446,6 +467,8 @@ internal class ManualNubiaPairController(
         private const val MONITOR_HOLE_DIAMETER_MM = 1.2f
         private const val HIDDEN_ALPHA = 0.20f
         private const val MIN_FIRE_INTERVAL_MS = 120L
+        private const val HOLD_QUARTER_MS = 250
+        private const val HOLD_MAX_QUARTERS = 20
 
         // Reference supplied by the user: #FFE27C. Tolerances are intentionally
         // narrow so unrelated yellow/orange UI colors are not treated as white.
@@ -458,6 +481,7 @@ internal class ManualNubiaPairController(
         private const val KEY_TRIGGER_X = "manual_pair_trigger_x"
         private const val KEY_TRIGGER_Y = "manual_pair_trigger_y"
         private const val KEY_BINDING = "manual_shoulder_binding"
+        private const val KEY_HOLD_QUARTERS = "manual_shoulder_hold_quarters"
         private const val MANUAL_POSITION_KEY = "manual.trigger"
     }
 }

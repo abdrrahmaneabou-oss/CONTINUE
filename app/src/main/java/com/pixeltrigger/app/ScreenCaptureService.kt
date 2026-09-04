@@ -953,9 +953,43 @@ class ScreenCaptureService : Service() {
             manualRow.addView(visibleButton, LinearLayout.LayoutParams(0, dp(38), 1f))
             body.addView(manualRow, matchWrap(dp(40)))
             body.addView(
-                sectionLabel("مراقبة المركز 0.3mm • أبيض = ON • غير أبيض = OFF", Color.rgb(155, 95, 25)),
+                sectionLabel("مراقبة المركز 0.3mm • أبيض/أصفر فاتح = ON • غير ذلك = OFF", Color.rgb(155, 95, 25)),
                 matchWrap(),
             )
+
+            val manualHoldRow = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            val manualHoldLabel = TextView(this).apply {
+                text = "HOLD الدائرة"
+                gravity = Gravity.CENTER
+                textSize = 12f
+                setTextColor(Color.rgb(92, 58, 20))
+            }
+            val manualHoldValue = TextView(this).apply {
+                gravity = Gravity.CENTER
+                textSize = 12f
+                setTextColor(Color.rgb(92, 58, 20))
+            }
+            fun refreshManualHold() {
+                manualHoldValue.text = manualTapPair.holdLabel
+                menuStatusText?.text = combinedStatusText()
+            }
+            val manualHoldMinus = menuButton("−") {
+                manualTapPair.setHoldQuarters(manualTapPair.holdQuarters - 1)
+                refreshManualHold()
+            }
+            val manualHoldPlus = menuButton("+") {
+                manualTapPair.setHoldQuarters(manualTapPair.holdQuarters + 1)
+                refreshManualHold()
+            }
+            manualHoldRow.addView(manualHoldLabel, LinearLayout.LayoutParams(0, dp(44), 1f))
+            manualHoldRow.addView(manualHoldMinus, LinearLayout.LayoutParams(dp(48), dp(42)))
+            manualHoldRow.addView(manualHoldValue, LinearLayout.LayoutParams(dp(88), dp(42)))
+            manualHoldRow.addView(manualHoldPlus, LinearLayout.LayoutParams(dp(48), dp(42)))
+            refreshManualHold()
+            body.addView(manualHoldRow, matchWrap(dp(46)))
 
             val bindRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
             val bindRealR = microCard("") {}

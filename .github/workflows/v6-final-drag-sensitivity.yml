@@ -1,0 +1,266 @@
+name: V6 final drag sensitivity build
+
+on:
+  push:
+    branches: [v6-final-drag-sensitivity]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply final V6 source patch
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          controller = Path('app/src/main/java/com/pixeltrigger/app/AnalogShoulderController.kt')
+          text = controller.read_text()
+
+          old = '''    private var decisionDelayMs = normalizeDecisionDelay(
+        prefs.getInt(KEY_DECISION_DELAY_MS, DEFAULT_DECISION_DELAY_MS),
+    )
+'''
+          new = '''    private var decisionDelayMs = normalizeDecisionDelay(
+        prefs.getInt(KEY_DECISION_DELAY_MS, DEFAULT_DECISION_DELAY_MS),
+    )
+    var dragSensitivity: Int = prefs.getInt(KEY_DRAG_SENSITIVITY, DEFAULT_DRAG_SENSITIVITY)
+        .coerceIn(DRAG_SENSITIVITY_MIN, DRAG_SENSITIVITY_MAX)
+        private set
+'''
+          assert old in text
+          text = text.replace(old, new, 1)
+
+          old = '''    private var fingerOffsetX = 0f
+    private var fingerOffsetY = 0f
+'''
+          new = '''    private var fingerDownRawX = 0f
+    private var fingerDownRawY = 0f
+    private var dragStartCenterX = 0f
+    private var dragStartCenterY = 0f
+'''
+          assert old in text
+          text = text.replace(old, new, 1)
+
+          old = '''    val decisionDelayLabel: String get() = "$decisionDelayMs ms"
+    val fastLabel: String get() = if (fastEnabled) "FAST ON" else "FAST OFF"
+'''
+          new = '''    val decisionDelayLabel: String get() = "$decisionDelayMs ms"
+    val dragSensitivityLabel: String get() = "$dragSensitivity / 100"
+    val fastLabel: String get() = if (fastEnabled) "FAST ON" else "FAST OFF"
+'''
+          assert old in text
+          text = text.replace(old, new, 1)
+
+          old = '''    fun decreaseDecisionDelay() = setDecisionDelay(decisionDelayMs - DECISION_DELAY_STEP_MS)
+    fun increaseDecisionDelay() = setDecisionDelay(decisionDelayMs + DECISION_DELAY_STEP_MS)
+
+    fun toggleFast() {
+'''
+          new = '''    fun decreaseDecisionDelay() = setDecisionDelay(decisionDelayMs - DECISION_DELAY_STEP_MS)
+    fun increaseDecisionDelay() = setDecisionDelay(decisionDelayMs + DECISION_DELAY_STEP_MS)
+
+    fun setDragSensitivity(value: Int) {
+        val normalized = value.coerceIn(DRAG_SENSITIVITY_MIN, DRAG_SENSITIVITY_MAX)
+        if (normalized == dragSensitivity) return
+        dragSensitivity = normalized
+        prefs.edit().putInt(KEY_DRAG_SENSITIVITY, normalized).apply()
+    }
+
+    fun toggleFast() {
+'''
+          assert old in text
+          text = text.replace(old, new, 1)
+
+          old = '''                    val center = knobCenter()
+                    fingerOffsetX = event.rawX - center.first
+                    fingerOffsetY = event.rawY - center.second
+                    decision = Decision.PENDING
+'''
+          new = '''                    val center = knobCenter()
+                    fingerDownRawX = event.rawX
+                    fingerDownRawY = event.rawY
+                    dragStartCenterX = center.first
+                    dragStartCenterY = center.second
+                    decision = Decision.PENDING
+'''
+          assert old in text
+          text = text.replace(old, new, 1)
+
+          old = '''                        val reachedRLimit = moveKnobToward(
+                            event.rawX - fingerOffsetX,
+                            event.rawY - fingerOffsetY,
+                        )
+'''
+          new = '''                        val sensitivityScale = dragSensitivity / 100f
+                        val reachedRLimit = moveKnobToward(
+                            dragStartCenterX + (event.rawX - fingerDownRawX) * sensitivityScale,
+                            dragStartCenterY + (event.rawY - fingerDownRawY) * sensitivityScale,
+                        )
+'''
+          assert old in text
+          text = text.replace(old, new, 1)
+
+          old = '''        private const val KEY_DECISION_DELAY_MS = "v6_analog_decision_delay_ms"
+        private const val KEY_FAST_ENABLED = "v6_analog_fast_enabled"
+'''
+          new = '''        private const val KEY_DECISION_DELAY_MS = "v6_analog_decision_delay_ms"
+        private const val KEY_DRAG_SENSITIVITY = "v6_analog_drag_sensitivity"
+        private const val KEY_FAST_ENABLED = "v6_analog_fast_enabled"
+'''
+          assert old in text
+          text = text.replace(old, new, 1)
+
+          old = '''        private const val DEFAULT_DECISION_DELAY_MS = 150
+        private const val DECISION_DELAY_MIN_MS = 50
+'''
+          new = '''        private const val DEFAULT_DECISION_DELAY_MS = 150
+        private const val DEFAULT_DRAG_SENSITIVITY = 100
+        private const val DRAG_SENSITIVITY_MIN = 1
+        private const val DRAG_SENSITIVITY_MAX = 100
+        private const val DECISION_DELAY_MIN_MS = 50
+'''
+          assert old in text
+          text = text.replace(old, new, 1)
+
+          old = '''        // Requested progression: 0.25, 0.35, ... 1.95, with 2.00 as the final cap.
+        private val SIZE_STEPS = ((25..195 step 10).toList() + 200).toIntArray()
+'''
+          new = '''        // Preserve the requested 0.10 cm progression and extend the final cap to 3.00 cm.
+        private val SIZE_STEPS = ((25..295 step 10).toList() + 300).toIntArray()
+'''
+          assert old in text
+          text = text.replace(old, new, 1)
+          controller.write_text(text)
+
+          screen = Path('app/src/main/java/com/pixeltrigger/app/ScreenCaptureService.kt')
+          text = screen.read_text()
+
+          old = '''import android.widget.ScrollView
+import android.widget.Switch
+import android.widget.TextView
+'''
+          new = '''import android.widget.ScrollView
+import android.widget.SeekBar
+import android.widget.Switch
+import android.widget.TextView
+'''
+          assert old in text
+          text = text.replace(old, new, 1)
+
+          old = '''            content.addView(
+                analogSizeRow(
+                    "WAIT",
+                    { analogShoulder.decisionDelayLabel },
+                    { analogShoulder.decreaseDecisionDelay() },
+                    { analogShoulder.increaseDecisionDelay() },
+                ),
+                matchWrap(dp(44)),
+            )
+            val fastBrakeRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+'''
+          new = '''            content.addView(
+                analogSizeRow(
+                    "WAIT",
+                    { analogShoulder.decisionDelayLabel },
+                    { analogShoulder.decreaseDecisionDelay() },
+                    { analogShoulder.increaseDecisionDelay() },
+                ),
+                matchWrap(dp(44)),
+            )
+            content.addView(analogSensitivityRow(), matchWrap(dp(48)))
+            val fastBrakeRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+'''
+          assert old in text
+          text = text.replace(old, new, 1)
+
+          old = '''    private fun sectionLabel(value: String, color: Int) = TextView(this).apply {
+'''
+          new = '''    private fun analogSensitivityRow(): View {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(4), 0, dp(4), 0)
+        }
+        val label = TextView(this).apply {
+            textSize = 11f
+            gravity = Gravity.CENTER
+            setTextColor(Color.rgb(42, 65, 78))
+        }
+        val seek = SeekBar(this).apply {
+            max = 99
+            progress = analogShoulder.dragSensitivity - 1
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                    if (!fromUser) return
+                    analogShoulder.setDragSensitivity(progress + 1)
+                    label.text = "SENS  ${analogShoulder.dragSensitivityLabel}"
+                }
+                override fun onStartTrackingTouch(seekBar: SeekBar?) = Unit
+                override fun onStopTrackingTouch(seekBar: SeekBar?) = Unit
+            })
+        }
+        label.text = "SENS  ${analogShoulder.dragSensitivityLabel}"
+        row.addView(label, LinearLayout.LayoutParams(dp(96), dp(44)))
+        row.addView(seek, LinearLayout.LayoutParams(0, dp(44), 1f))
+        return row
+    }
+
+    private fun sectionLabel(value: String, color: Int) = TextView(this).apply {
+'''
+          assert old in text
+          text = text.replace(old, new, 1)
+
+          old = '''                    text = "R قبل WAIT = فوري • FAST يسمح L→R بعد WAIT • الأخضر يمنع/يوقف R/L • الأحمر يسمح ويعيد التشغيل ما دام الإصبع ضاغطًا"
+'''
+          new = '''                    text = "R قبل WAIT = فوري • FAST يسمح L→R بعد WAIT • SENS 100 = الحركة الحالية و1 = ثقيلة جدًا • الأخضر يمنع/يوقف R/L • الأحمر يسمح ويعيد التشغيل ما دام الإصبع ضاغطًا"
+'''
+          assert old in text
+          text = text.replace(old, new, 1)
+          screen.write_text(text)
+
+          gradle = Path('app/build.gradle.kts')
+          text = gradle.read_text()
+          assert 'versionCode = 64' in text
+          assert 'versionName = "6.2-fast-monitor-brake"' in text
+          text = text.replace('versionCode = 64', 'versionCode = 65', 1)
+          text = text.replace('versionName = "6.2-fast-monitor-brake"', 'versionName = "6.3-final-drag-sensitivity"', 1)
+          gradle.write_text(text)
+          PY
+
+      - name: Verify final invariants
+        shell: bash
+        run: |
+          grep -q 'SIZE_STEPS = ((25..295 step 10).toList() + 300)' app/src/main/java/com/pixeltrigger/app/AnalogShoulderController.kt
+          grep -q 'DEFAULT_DRAG_SENSITIVITY = 100' app/src/main/java/com/pixeltrigger/app/AnalogShoulderController.kt
+          grep -q 'sensitivityScale = dragSensitivity / 100f' app/src/main/java/com/pixeltrigger/app/AnalogShoulderController.kt
+          grep -q 'max = 99' app/src/main/java/com/pixeltrigger/app/ScreenCaptureService.kt
+          grep -q 'versionCode = 65' app/build.gradle.kts
+          grep -q 'versionName = "6.3-final-drag-sensitivity"' app/build.gradle.kts
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - name: Install Android SDK, NDK and CMake
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;27.0.12077973" "cmake;3.22.1"
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Test and build
+        run: ./gradlew testDebugUnitTest assembleDebug --stacktrace
+      - name: Commit clean source
+        shell: bash
+        run: |
+          rm .github/workflows/v6-final-drag-sensitivity.yml
+          git config user.name "CHATGPT"
+          git config user.email "abdrrahmaneabou@gmail.com"
+          git add app/build.gradle.kts app/src/main/java/com/pixeltrigger/app/AnalogShoulderController.kt app/src/main/java/com/pixeltrigger/app/ScreenCaptureService.kt .github/workflows/v6-final-drag-sensitivity.yml
+          git commit -m "feat: finalize V6 size range and drag sensitivity"
+          git push
